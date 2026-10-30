@@ -1,10 +1,10 @@
-# Agent Orchestrator — Phase 2-E3.2
+# Agent Orchestrator — 開発運用とMCP 11操作
 
 パスは[表記規約](docs/path-conventions.md)の疑似パスです。シェル例は同ページの変数を設定してから使用します。原本ログは変更していません。
 
 ChatGPTサブスクリプション認証済みCodexを、専用App Server stdioから制御する最大2セッションのランナーとユーザーdaemonです。
 Python 3.14標準ライブラリを使用し、新しいSDK・フレームワークやモデル推論の従量課金APIは使いません。
-障害後の照合と再実行、Codexの正常終了とタスクの検証成功を分けます。専用workspaceの隔離・並列実行・独立レビューに対応します。永続FIFOとUnix socket制御に対応します。ローカルstdio MCPアダプターを提供し、既存AceISコネクターから実Tunnel経由の読み取り往復を確認しています。ローカルLLM接続や公開HTTP listenerは追加していません。
+障害後の照合と再実行、Codexの正常終了とタスクの検証成功を分けます。専用workspaceの隔離・並列実行・独立レビュー、永続FIFOとUnix socket制御に対応します。現用MCPは状態参照3操作・既存ローカルLLM4操作・固定slotのmailbox4操作の計11操作です。ChatGPT側の要求取得・回答保存とローカルCodexによる本文回収を確認しました。実装ジョブのsubmit/cancelは公開せず、親dotの直接呼出しと休止Chatの起動は未検証です。新しい通常タスクのslotは候補準備と個別承認を経て追加します。独自の公開HTTP listenerは追加していません。
 Secure MCP TunnelにはCodexのサブスクリプション認証とは別の既存runtimeキーとPlatform権限を使用します。キーは承認済みのprivate fileをnative clientが参照し、新規発行や課金・権限設定の変更は行っていません。
 
 ## 環境
