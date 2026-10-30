@@ -1,4 +1,10 @@
-# Nativeチームの限定導入案
+# Nativeチームの実行経路と境界
+
+## 2026-10-30の再開作業
+
+既存の検証済みPlan/artifact部品をsrc/native_team_plan.py / native_team_artifacts.pyへ採用し、src/native_team.pyで開始前の永続admission、実native ID、revision/hash、検証receipt、UNKNOWN/timeout時の未解放slotを接続する。標準toolsの呼出しは親Coordinatorが担当する。独立2 worktree→親統合→独立Verifier→永続記録のPoCと、既存FIFO daemonへの本番接続は区別する。
+
+新しい操作手順はdocs/native-team-poc.md、残課題はdocs/issues/native-team-followups.md。以下は旧段階の接続境界を含む履歴であり、未実装との記述は新手順と実行証拠に照合する。native roleは運用上の役割で、独立sandbox権限の保証ではない。global config、service、GPU/local LLM、MCP公開範囲は変更しない。
 
 このファイル群は既存ランナーの置換ではない。既存の専用Codex home、multi_agent=false、隔離fixture、SQLite、MCPの読み取り3ツール、Tunnelの2 user serviceを変更しない。
 
