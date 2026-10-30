@@ -76,6 +76,6 @@ rollbackは新flagを外して旧11操作の起動引数へ戻す。実行中tas
 | モデルのファイル編集・実行 | 初段read-onlyでは対象外。write scopeと実行環境の追加承認が必要 |
 | 常駐通知・自律継続 | 未実装。events/tickの明示pollが必要 |
 
-逆方向の既存UI経路は、導入済みCodex app toolの `send_message_to_thread` が既存ChatGPT会話を対象にできる契約を確認した。ChatGPT宛にはmodel/thinking overrideは適用されない。送信には宛先会話へのユーザー明示承認が必要で、今回メッセージは送っていない。`read_thread`は状態/要約/参照を返す経路であり、過去の本文回収不能が今回解消したとは扱わない。UI toolはこのlocal stdio executorやイントラMCPから呼べるHTTP APIではなく、自動wake bridgeは未実装。実際に許可されたUI側Codexが既存Chatへ投稿し、Chatが既存mailbox APIで回答を保存する経路を再利用する案はあるが、今回の12toolだけでその両端が自動接続されたことにはならない。
+逆方向の既存UI経路は、導入済みCodex app toolの `send_message_to_thread` が既存ChatGPT会話を対象にできる契約を確認した。ChatGPT宛にはmodel/thinking overrideは適用されない。送信には宛先会話へのユーザー明示承認が必要で、今回メッセージは送っていない。`read_thread`は現在の実機確認で、既存Chatの過去回答495文字を省略なしに取得できた。以前の本文参照だけという制約と区別し、この1件での本文回収成功を記録する。他会話や実行中turnの回収まで保証しない。UI toolはこのlocal stdio executorやイントラMCPから呼べるHTTP APIではなく、自動wake bridgeは未実装。実際に許可されたUI側Codexが既存Chatへ投稿し、Chatが既存mailbox APIで回答を保存する経路を再利用する案はあるが、今回の12toolだけでその両端が自動接続されたことにはならない。
 
 秘密・顧客情報を依頼へ入れない。prompt/answerはprivate ledgerと該当get結果に含まれるが、audit/eventsへ本文・コマンド・credential・workspace実pathを記録しない。ID/hashはChatのidentity証明ではない。
