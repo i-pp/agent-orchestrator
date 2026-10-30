@@ -86,7 +86,53 @@ _SERVER_REQUESTS = APPROVAL_METHODS | {
 # Only interpreted lifecycle notifications. Others are forwarded as unknown.
 _NOTIFICATIONS = frozenset({"thread/started", "thread/status/changed", "thread/archived",
     "thread/closed", "turn/started", "turn/completed", "error", "serverRequest/resolved",
-    "item/started", "item/completed", "item/agentMessage/delta"})
+    "item/started", "item/completed", "item/agentMessage/delta", "account/updated",
+    "account/gatewayOAuth/changed", "account/rateLimits/updated", "account/login/completed"})
+
+
+def _json_type(value):
+    return {dict: 'object', list: 'array', str: 'string', int: 'integer',
+            float: 'number', bool: 'boolean', type(None): 'null'}.get(type(value), 'other')
+
+
+def frame_shape(value):
+    """Fixed allowlisted key/type metadata. No account, trace or error values."""
+    def members(obj, allowed):
+        if type(obj) is not dict: return {'type': _json_type(obj)}
+        known = set(obj) & set(allowed)
+        return {'type': 'object', 'fields': {k: _json_type(obj[k]) for k in sorted(known)},
+                'other_field_count': len(set(obj) - known)}
+    shape = members(value, ('id', 'method', 'params', 'result', 'error', 'jsonrpc', 'trace', '_meta'))
+    if type(value) is not dict: return shape
+    if 'method' in value:
+        method = value['method']
+        shape['method_class'] = method if isinstance(method, str) and method in (_SERVER_REQUESTS | _NOTIFICATIONS) else 'OTHER'
+    for key, allowed in [('trace', ('traceparent', 'tracestate')),
+                         ('result', ('account', 'requiresOpenaiAuth', 'data', 'nextCursor')),
+                         ('error', ('code', 'message', 'data'))]:
+        if key in value: shape[key] = members(value[key], allowed)
+    result = value.get('result')
+    if isinstance(result, dict) and 'account' in result:
+        shape['account'] = members(result['account'], ('type', 'email', 'planType'))
+    return shape
+
+
+def _server_message(message):
+    allowed = {'id', 'method', 'params', 'jsonrpc'}
+    if isinstance(message, dict) and 'id' in message: allowed.add('trace')
+    _object(message, allowed, {'method'})
+    if (type(message['method']) is not str or not message['method']
+            or message.get('jsonrpc', '2.0') != '2.0'
+            or ('id' in message and not _valid_id(message['id']))):
+        raise ProtocolError('invalid server message')
+    if 'trace' in message and message['trace'] is not None:
+        trace = message['trace']
+        if type(trace) is not dict or any(k in trace and trace[k] is not None and type(trace[k]) is not str
+                                         for k in ('traceparent', 'tracestate')):
+            raise ProtocolError('invalid server trace context')
+    # Generic JSONRPCRequest schema permits optional trace; lifecycle consumers
+    # need neither its values nor its future fields. Never forward/store it.
+    return {k: v for k, v in message.items() if k != 'trace'}
 
 
 class ProtocolError(RuntimeError):
@@ -258,6 +304,8 @@ class ProtocolClient:
             raise ProtocolError("no transport configured")
         message = _json_copy(message, self.max_payload_bytes)
         self._diag.update(last_method=message['method'], stage='exchange', failure_code=None)
+        for key in ('rpc_error_code', 'last_response_shape', 'last_server_message_shape'):
+            self._diag.pop(key, None)
         start = time.monotonic()
         try:
             response = self.exchange(message, self.timeout_s)
@@ -274,6 +322,7 @@ class ProtocolClient:
                     raise ProtocolError("notification must not receive a response")
                 return None
             response = _json_copy(response, self.max_response_bytes)
+            self._diag['last_response_shape'] = frame_shape(response)
             _object(response, {"id", "result", "error", "jsonrpc"}, {"id"})
             if (not _valid_id(response["id"]) or type(response["id"]) is not type(message["id"])
                     or response["id"] != message["id"] or response.get("jsonrpc", "2.0") != "2.0"
@@ -345,11 +394,8 @@ class ProtocolClient:
         No response-writing or approval-resolution capability is exposed here.
         """
         message = _json_copy(message, self.max_response_bytes)
-        _object(message, {"id", "method", "params", "jsonrpc"}, {"method"})
-        if (type(message["method"]) is not str or not message["method"]
-                or message.get("jsonrpc", "2.0") != "2.0"
-                or ("id" in message and not _valid_id(message["id"]))):
-            raise ProtocolError("invalid server message")
+        self._diag['last_server_message_shape'] = frame_shape(message)
+        message = _server_message(message)
         request = "id" in message
         method = message["method"]
         event = {"kind": "server_request" if request else "notification",
@@ -518,6 +564,7 @@ class StdioTransport:
                     raise ProtocolUnknown("stdio frame must be an object")
                 self._diag['frames_received'] += 1
                 self._diag['stage'] = 'frame_received'
+                self._diag['last_frame_shape'] = frame_shape(message)
                 return message
             if len(self._buffer) > self.max_frame_bytes:
                 self._failure('FRAME_CAPACITY')
@@ -542,14 +589,18 @@ class StdioTransport:
                 self._buffer += data
 
     def _event(self, message):
-        _object(message, {"id", "method", "params", "jsonrpc"}, {"method"})
-        if (type(message["method"]) is not str or not message["method"]
-                or message.get("jsonrpc", "2.0") != "2.0"
-                or ("id" in message and not _valid_id(message["id"]))):
-            raise ProtocolUnknown("invalid stdio server event")
+        self._diag['stage'] = 'server_message_validation'
+        try: message = _server_message(message)
+        except ProtocolError:
+            self._failure('SERVER_MESSAGE_ENVELOPE')
+            raise
         if self.event_sink is None:
             raise ProtocolUnknown("server event has no configured sink")
-        self.event_sink(message)
+        self._diag['stage'] = 'server_event_delivery'
+        try: self.event_sink(message)
+        except Exception:
+            self._failure('SERVER_EVENT_HANDLER')
+            raise
 
     def __call__(self, message, timeout_s):
         self._ready()
@@ -586,7 +637,11 @@ class StdioTransport:
                 if "method" in response:
                     self._event(response)
                     continue
-                _object(response, {"id", "result", "error", "jsonrpc"}, {"id"})
+                self._diag['stage'] = 'response_envelope_validation'
+                try: _object(response, {"id", "result", "error", "jsonrpc"}, {"id"})
+                except ProtocolError:
+                    self._failure('RESPONSE_ENVELOPE')
+                    raise
                 if (type(response["id"]) is not type(message["id"]) or response["id"] != message["id"]
                         or response.get("jsonrpc", "2.0") != "2.0"
                         or ("result" in response) == ("error" in response)):

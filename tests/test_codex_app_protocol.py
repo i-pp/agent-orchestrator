@@ -1,5 +1,6 @@
 """Fake-peer tests only: no server, model, auth, process or network startup."""
 import hashlib
+import fcntl
 import json
 import os
 import subprocess
@@ -12,7 +13,7 @@ from unittest.mock import patch
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "src"))
 from codex_app_protocol import (ALLOWED_METHODS, METHOD_SCHEMAS, SCHEMA_SHA256,
-    SCHEMA_VERSION, ProtocolClient, ProtocolError, ProtocolUnknown, RpcError, StdioTransport, schema_version_supported)
+    SCHEMA_VERSION, ProtocolClient, ProtocolError, ProtocolUnknown, RpcError, StdioTransport, schema_version_supported, frame_shape)
 
 INITIALIZE = {"codexHome": "/offline/codex", "platformFamily": "unix",
               "platformOs": "linux", "userAgent": "codex/0.165.0"}
@@ -113,6 +114,41 @@ class ProtocolTests(unittest.TestCase):
             with self.assertRaises(ProtocolError):
                 client.request("account/read", params)
         self.assertEqual(len(peer.calls), count)
+
+    def test_fixed_shape_metadata_never_contains_account_trace_or_unknown_values(self):
+        message = {'id': 2, 'result': {'account': {'type': 'chatgpt', 'email': 'canary-private@example.invalid',
+            'planType': 'canary-plan', 'private-account-field': 'canary-value'}, 'requiresOpenaiAuth': True},
+            'trace': {'traceparent': 'canary-trace', 'private-trace-field': 'canary-trace-value'},
+            'canary-unknown-key': 'canary-unknown-value'}
+        shape = frame_shape(message)
+        self.assertEqual(shape['fields']['result'], 'object')
+        self.assertEqual(shape['account']['fields']['email'], 'string')
+        self.assertEqual(shape['other_field_count'], 1)
+        self.assertEqual(shape['trace']['other_field_count'], 1)
+        self.assertNotIn('canary', json.dumps(shape))
+
+    def test_valid_optional_server_request_trace_is_discarded_before_consumer(self):
+        events = []
+        client, _ = self.client(event_sink=events.append)
+        client.receive({'id': 'server-1', 'method': 'account/chatgptAuthTokens/refresh', 'params': {},
+                        'trace': {'traceparent': 'private-trace', 'tracestate': None}})
+        self.assertEqual(events[0]['kind'], 'server_request')
+        self.assertNotIn('trace', events[0]['message'])
+        self.assertNotIn('private-trace', json.dumps(client.diagnostics()))
+        with self.assertRaises(ProtocolError):
+            client.receive({'id': 'server-2', 'method': 'item/permissions/requestApproval', 'trace': {'traceparent': 42}})
+
+    def test_account_rpc_rejection_is_distinct_from_envelope_or_result_failure(self):
+        client, peer = self.client()
+        peer.answer = lambda m: {'id': m['id'], 'error': {'code': -32001, 'message': 'anonymized private error'}}
+        with self.assertRaises(RpcError): client.request('account/read', {'refreshToken': False})
+        self.assertEqual(client.diagnostics()['failure_code'], 'SERVER_REJECTED')
+        self.assertNotIn('rpc_error_code', client.diagnostics())
+        self.assertNotIn('anonymized private error', json.dumps(client.diagnostics()))
+        peer.answer = lambda m: {'id': m['id'], 'result': {'requiresOpenaiAuth': 'invalid-type'}}
+        with self.assertRaises(ProtocolUnknown): client.request('account/read', {'refreshToken': False})
+        self.assertEqual(client.diagnostics()['failure_code'], 'INVALID_RESULT_SCHEMA')
+        self.assertNotIn('rpc_error_code', client.diagnostics())
 
     def test_unsafe_and_unknown_methods_never_reach_peer(self):
         client, peer = self.client()
@@ -404,6 +440,37 @@ class StdioTests(unittest.TestCase):
         self.assertEqual(process.sent(), [])
         self.assertEqual(transport.poll(), 0)
 
+    def test_auth_server_request_with_trace_reaches_readonly_stop_boundary(self):
+        transport, process = self.transport()
+        blocked = []
+        def observer(event):
+            if event['kind'] == 'server_request':
+                blocked.append(event['message']['method'])
+                raise ProtocolError('READ_ONLY_BOUNDARY')
+        client = ProtocolClient(transport, event_sink=observer)
+        transport.event_sink = client.receive
+        process.emit({'id': 1, 'result': INITIALIZE}); client.initialize()
+        process.emit({'id': 'server-1', 'method': 'account/chatgptAuthTokens/refresh', 'params': {},
+                      'trace': {'traceparent': 'anonymous-trace'}})
+        with self.assertRaises(ProtocolUnknown): client.request('account/read', {'refreshToken': False})
+        self.assertEqual(blocked, ['account/chatgptAuthTokens/refresh'])
+        self.assertEqual(transport.diagnostics()['failure_code'], 'SERVER_EVENT_HANDLER')
+        self.assertEqual(transport.diagnostics()['last_frame_shape']['fields']['trace'], 'object')
+        self.assertNotIn('anonymous-trace', json.dumps(transport.diagnostics()))
+        self.assertEqual([x['method'] for x in process.sent()], ['initialize', 'initialized', 'account/read'])
+
+    def test_nonstandard_response_key_is_shape_only_and_not_mislabelled_auth(self):
+        transport, process = self.transport()
+        client = ProtocolClient(transport)
+        process.emit({'id': 1, 'result': INITIALIZE}); client.initialize()
+        process.emit({'id': 2, 'result': {'account': None, 'requiresOpenaiAuth': True},
+                      'canary-private-key': 'canary-private-value'})
+        with self.assertRaises(ProtocolUnknown): client.request('account/read', {'refreshToken': False})
+        facts = transport.diagnostics()
+        self.assertEqual(facts['failure_code'], 'RESPONSE_ENVELOPE')
+        self.assertEqual(facts['last_frame_shape']['other_field_count'], 1)
+        self.assertNotIn('canary', json.dumps(facts))
+
     def test_timeout_poisoned_connection_has_no_replay(self):
         transport, process = self.transport()
         request = {"id": 1, "method": "thread/archive", "params": {"threadId": "t"}}
@@ -552,6 +619,9 @@ class StdioTests(unittest.TestCase):
         process.emit({'id': 1, 'result': INITIALIZE})
         client.initialize()
         process.sent()  # Remove only the already confirmed handshake.
+        # Bound fixture pipes after draining the preloaded fake handshake.
+        fcntl.fcntl(process.input_read, fcntl.F_SETPIPE_SZ, 4096)
+        fcntl.fcntl(process.stderr_write, fcntl.F_SETPIPE_SZ, 4096)
         errors, received = [], []
         os.set_blocking(process.input_read, True)
         def peer():
