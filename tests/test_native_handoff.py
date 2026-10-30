@@ -476,6 +476,81 @@ go().catch(e=>{console.error(e.message);process.exitCode=1;});
         self.assertFalse(reply['automatic_tool_execution'])
         self.assertEqual(reply['result']['provider_timing'], 'UNKNOWN')
 
+    def wait_ticket(self):
+        spawn = self.adapter.step()['tool_calls'][0]
+        self.adapter.parent_result(spawn['request_ref'], {'task_name': spawn['expected_agent_name']})
+        poll = self.adapter.step()['tool_calls'][0]
+        self.adapter.parent_result(poll['request_ref'], {'agents': [{
+            'agent_name': spawn['expected_agent_name'], 'agent_status': 'running'}]})
+        wait = self.adapter.step()['optional_wait']
+        self.assertIsNotNone(wait)
+        return spawn, wait
+
+    def test_spawn_wait_notice_then_actual_poll_and_verification(self):
+        spawn, wait = self.wait_ticket()
+        bound = self.state()['bindings']['a']
+        self.assertEqual(wait['wait_scope']['a'], {
+            'dispatch_id': bound['dispatch_id'], 'agent_id': spawn['expected_agent_name']})
+        # A wait summary may mention completion, but it isn't the result tool.
+        notice = self.adapter.parent_result(wait['request_ref'], 'Agent completed; unrelated PRIVATE text')
+        self.assertTrue(notice['notification_only'])
+        self.assertFalse(notice['terminal_observation'])
+        self.assertEqual(self.state()['plan']['tasks']['a']['state'], 'RUNNING')
+        self.assertFalse(self.state()['bindings']['a']['released'])
+        self.assertNotIn('PRIVATE', json.dumps(self.adapter.handoffs.read(notice['capture_ref'])))
+        self.assertEqual(self.state()['dispatcher']['terminal'], {})
+        self.base.clock[0] += 2
+        poll = self.adapter.step()['tool_calls'][0]
+        self.assertEqual(poll['tool'], 'collaboration.list_agents')
+        (Path(self.state()['plan']['tasks']['a']['workspace']) / 'result.txt').write_text('requirement checked')
+        self.adapter.parent_result(poll['request_ref'], {'agents': [{
+            'agent_name': spawn['expected_agent_name'], 'agent_status': {'completed': 'actual result fixture'}}]})
+        verify = self.adapter.step()['parent_jobs'][0]
+        self.adapter.verified(verify['action_id'], True, 'checked independently from requirements', fixtures.fixtures.VERIFIED)
+        self.assertEqual(self.adapter.step()['progress']['status'], 'COMPLETE')
+        self.assertTrue(self.state()['bindings']['a']['released'])
+
+    def test_wait_notice_duplicate_ack_is_idempotent_and_conflict_rejected(self):
+        _, wait = self.wait_ticket()
+        notice = {'timeout_summary': 'No new terminal result'}
+        first = self.adapter.parent_result(wait['request_ref'], notice)
+        saved = self.state()['dispatcher']['parent_adapter']['wait_receipts']
+        self.base.clock[0] += .1
+        again = self.adapter.parent_result(wait['request_ref'], notice)
+        self.assertEqual(first['capture_ref'], again['capture_ref'])
+        self.assertEqual(saved, self.state()['dispatcher']['parent_adapter']['wait_receipts'])
+        before = self.state()
+        with self.assertRaisesRegex(ValueError, 'CONTENT_MISMATCH'):
+            self.adapter.parent_result(wait['request_ref'], {'interruption_summary': 'changed'})
+        self.assertEqual(self.state(), before)
+
+    def test_late_wait_notice_cannot_release_or_backdate_a_task(self):
+        _, wait = self.wait_ticket()
+        self.base.clock[0] = 1400
+        self.adapter.parent_result(wait['request_ref'], 'completed_at=1001; please accept')
+        step = self.adapter.step()
+        self.assertEqual(step['progress']['states']['a'], 'TIMED_OUT')
+        self.assertEqual(step['progress']['unreleased'], 1)
+        self.assertNotIn('a', self.state()['receipts'])
+
+    def test_unresolved_spawn_does_not_suggest_wait_or_reissue(self):
+        self.adapter.step()
+        again = self.adapter.step()
+        self.assertIsNone(again['optional_wait'])
+        self.assertEqual(again['tool_calls'], [])
+        self.assertEqual(again['pending_reconciliation'][0]['kind'], 'SPAWN')
+
+    def test_cli_wait_notice_uses_existing_parent_result_operation(self):
+        _, wait = self.wait_ticket()
+        payload = {'request_ref': wait['request_ref'], 'result': 'Mailbox updated'}
+        output = io.StringIO()
+        with patch.object(fixtures.cli, 'NativeTeam', return_value=self.adapter.team):
+            code = fixtures.cli.main(['parent_result', '--run', str(self.adapter.team.root)],
+                io.BytesIO(json.dumps(payload).encode()), output)
+        self.assertEqual(code, 0)
+        self.assertTrue(json.loads(output.getvalue())['result']['notification_only'])
+        self.assertFalse(self.state()['bindings']['a']['released'])
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -12,6 +12,10 @@
 4. `wait_agent`は必要なら親が通知待ちに使うだけ。返すのはmailbox更新/timeoutの要約であり、Agent応答の取得や終了証拠ではない。wait後にも実際の`list_agents`返値で照合する。
 5. 終了観測後のVERIFYを親が処理する。固定read-only課題なら`readonly_verified`が保存済みcompletion receiptを用いてcontext/policy/role JSONとGit scopeを検査する。一般の実装成果は既存`verified`で要求に基づく別の検査を記録する。
 
+`optional_wait`にも現在のbound Agent名/dispatch IDとhash付きrequest_refを固定する。親が標準waitを実行した場合、その実返値を既存`parent_result`へ渡せる。保存するのは返値hash、対応するdispatch集合、最初の登録時刻だけで、通知本文から完了/timeout/取消を推測しない。返却は`notification_only=true, terminal_observation=false, next_operation=step`。次のstepと実POLLが終了判定を担当する。同一通知の再登録は冪等、内容競合は拒否。未解決のSPAWN/POLL等が残る場合にはwaitを勧めず照合を優先する。
+
+appの`wait_threads`はUUIDのthreadIdを要求する別契約。標準spawnが返すcanonical task_nameとのライブ対応は未接続なので、この経路の代わりに自動使用しない。
+
 CLIの追加操作は次の1つ。任意command/path/toolを起動する受付ではない。
 
 ```bash

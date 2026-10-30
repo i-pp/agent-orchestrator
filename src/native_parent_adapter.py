@@ -233,7 +233,17 @@ class NativeParentAdapter:
                      and t['id'] in state['bindings'] and not state['bindings'][t['id']]['released']]
         wait = (self._call('collaboration.wait_agent', {'timeout_ms': 10000}, [])
                 if progress['unreleased'] and deadlines and min(deadlines) - now > 10
-                and not calls and not jobs else None)
+                and not calls and not jobs and not pending
+                and all(b['agent_id'] for b in state['bindings'].values() if not b['released']) else None)
+        if wait:
+            # wait_agent returns a notification, not an Agent result. Pin the
+            # held dispatches so its receipt cannot refer to another attempt.
+            wait['wait_scope'] = {task_id: {'dispatch_id': b['dispatch_id'], 'agent_id': b['agent_id']}
+                                  for task_id, b in state['bindings'].items() if not b['released']}
+            wait['step_number'] = self._config(state)['steps']
+            wait['arguments_sha256'] = sha(wait['arguments'])
+            wait['request_ref'] = self.handoffs.put('request', sha({
+                'wait_at_step': wait['step_number'], 'spec_sha256': state['spec_sha256']}), wait)
         return {'profile': PROFILE, 'progress': progress, 'tool_calls': calls, 'parent_jobs': jobs,
                 'pending_reconciliation': pending, 'optional_wait': wait,
                 'steps_used': self._config(state)['steps'], 'automatic_tool_execution': False,

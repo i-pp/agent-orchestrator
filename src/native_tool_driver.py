@@ -36,6 +36,8 @@ class NativeToolDriver:
         """
         call = self.store.read(request_ref)
         tool = call['tool']
+        if tool == 'collaboration.wait_agent':
+            return self.record_wait_notice(request_ref, call, result)
         expected = {'collaboration.spawn_agent': 'SPAWN', 'collaboration.list_agents': 'POLL'}
         if tool not in expected:
             raise ValueError('PARENT_RETURN_SCHEMA_UNVERIFIED')
@@ -68,6 +70,41 @@ class NativeToolDriver:
         return {'capture_ref': reference, 'registration': self.ingest(reference),
                 'source': 'parent_standard_tool', 'automatic_tool_execution': False,
                 'provider_timing': 'UNKNOWN'}
+
+    def record_wait_notice(self, request_ref, call, result):
+        """Keep correlation only: never infer terminality from mailbox text."""
+        self.adapter._call(call['tool'], call['arguments'], call['action_ids'])
+        state = self.adapter.team.snapshot()
+        if (call['action_ids'] or not call.get('wait_scope')
+                or call['arguments_sha256'] != sha(call['arguments'])
+                or request_ref['key'] != sha({'wait_at_step': call['step_number'],
+                                            'spec_sha256': state['spec_sha256']})):
+            raise ValueError('WAIT_REQUEST_CORRELATION_REQUIRED')
+        def scope_matches(data):
+            for task_id, expected in call['wait_scope'].items():
+                bound = data['bindings'].get(task_id, {})
+                if {k: bound.get(k) for k in ['dispatch_id', 'agent_id']} != expected:
+                    raise ValueError('WAIT_SCOPE_CHANGED_RECONCILE')
+        scope_matches(state)
+        encoded(result)
+        reference = self.store.put('result', request_ref['key'], {
+            'request': request_ref, 'measurement_tool': 'parent_wait_notification',
+            'wait_scope': call['wait_scope'], 'raw_response_sha256': sha(result),
+            'notification_only': True, 'provider_completed_at': None})
+        def register(journal, data, now):
+            scope_matches(data)
+            receipts = journal['parent_adapter'].setdefault('wait_receipts', {})
+            prior = receipts.get(reference['key'])
+            if prior:
+                if prior['capture_ref'] != reference:
+                    raise ValueError('WAIT_RECEIPT_CONFLICT')
+                return
+            receipts[reference['key']] = {'capture_ref': reference, 'request_ref': request_ref,
+                'registered_at': now, 'wait_scope': call['wait_scope'], 'notification_only': True}
+        self.adapter.dispatcher._edit(register)
+        return {'capture_ref': reference, 'notification_only': True,
+                'terminal_observation': False, 'next_operation': 'step',
+                'automatic_tool_execution': False, 'provider_timing': 'UNKNOWN'}
 
     def execute(self, call):
         if not callable(self.port):
