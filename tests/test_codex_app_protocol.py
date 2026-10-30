@@ -5,6 +5,7 @@ import os
 import subprocess
 from pathlib import Path
 import sys
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -298,8 +299,10 @@ class PipeProcess:
     def __init__(self, *, force_kill=False):
         self.input_read, input_write = os.pipe()
         output_read, self.output_write = os.pipe()
+        stderr_read, self.stderr_write = os.pipe()
         self.stdin = os.fdopen(input_write, "wb", buffering=0)
         self.stdout = os.fdopen(output_read, "rb", buffering=0)
+        self.stderr = os.fdopen(stderr_read, "rb", buffering=0)
         os.set_blocking(self.input_read, False)
         self.status = None
         self.force_kill = force_kill
@@ -335,10 +338,11 @@ class PipeProcess:
     def cleanup(self):
         self.stdin.close()
         self.stdout.close()
-        for fd in (self.input_read, self.output_write):
+        self.stderr.close()
+        for fd in (self.input_read, self.output_write, self.stderr_write):
             if fd is not None:
                 os.close(fd)
-        self.output_write = self.input_read = None
+        self.output_write = self.input_read = self.stderr_write = None
 
 
 class StdioTests(unittest.TestCase):
@@ -351,7 +355,7 @@ class StdioTests(unittest.TestCase):
             transport.start()
         self.assertEqual(popen.call_args.args, (["codex", "app-server", "--listen", "stdio://"],))
         self.assertEqual(popen.call_args.kwargs, {"shell": False, "stdin": subprocess.PIPE,
-            "stdout": subprocess.PIPE, "stderr": subprocess.DEVNULL, "bufsize": 0, "close_fds": True})
+            "stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "bufsize": 0, "close_fds": True})
         return transport, process
 
     def test_constructing_client_and_transport_does_not_spawn(self):
@@ -473,6 +477,102 @@ class StdioTests(unittest.TestCase):
         process.emit({"id": 1, "result": {}})
         with self.assertRaises(ProtocolUnknown):
             transport.poll()
+
+    def test_startup_eof_retains_only_safe_stderr_and_exit_facts(self):
+        transport, process = self.transport()
+        os.write(process.stderr_write, b'WARNING: read-only file system; private-canary-value\n')
+        os.close(process.output_write)
+        process.output_write = None
+        process.status = 23
+        client = ProtocolClient(transport)
+        with self.assertRaises(ProtocolUnknown): client.initialize()
+        transport.close()
+        facts = transport.diagnostics()
+        self.assertEqual(facts['failure_code'], 'STDOUT_EOF')
+        self.assertIn('READ_ONLY_FILESYSTEM', facts['stderr_categories'])
+        self.assertEqual(facts['exit_code_before_close'], 23)
+        self.assertTrue(facts['reaped'])
+        self.assertFalse(facts['termination_requested'])
+        self.assertFalse(client.diagnostics()['initialize_acknowledged'])
+        self.assertNotIn('private-canary-value', json.dumps(facts))
+        self.assertEqual([m['method'] for m in process.sent()], ['initialize'])
+
+    def test_fragmented_utf8_response_partial_writes_and_stderr(self):
+        transport, process = self.transport()
+        result = {**INITIALIZE, 'codexHome': '/offline/例'}
+        os.write(process.output_write, (json.dumps({'id': 1, 'result': result}, ensure_ascii=False) + '\r\n').encode())
+        os.write(process.stderr_write, b'nonsecret warning\n')
+        read, write = os.read, os.write
+        def fragmented_read(fd, count): return read(fd, min(count, 2))
+        def partial_write(fd, data): return write(fd, data[:5])
+        client = ProtocolClient(transport)
+        with patch('codex_app_protocol.os.read', side_effect=fragmented_read), patch('codex_app_protocol.os.write', side_effect=partial_write):
+            self.assertEqual(client.initialize(), result)
+        self.assertTrue(client.diagnostics()['initialize_acknowledged'])
+        self.assertTrue(client.diagnostics()['initialized_notification_written'])
+        self.assertEqual([m['method'] for m in process.sent()], ['initialize', 'initialized'])
+
+    def test_valid_envelope_invalid_init_result_is_distinct_from_transport_eof(self):
+        transport, process = self.transport()
+        process.emit({'id': 1, 'result': {'userAgent': 'codex/0.165.0'}})
+        client = ProtocolClient(transport)
+        with self.assertRaises(ProtocolUnknown): client.initialize()
+        self.assertEqual(client.diagnostics()['failure_code'], 'INVALID_RESULT_SCHEMA')
+        self.assertEqual(transport.diagnostics()['stage'], 'response_received')
+        self.assertEqual(transport.diagnostics()['frames_received'], 1)
+        self.assertFalse(client.diagnostics()['initialize_acknowledged'])
+        with self.assertRaises(ProtocolError): client.initialize()
+        self.assertEqual([m['method'] for m in process.sent()], ['initialize'])
+
+    def test_lsp_content_length_is_rejected_without_automatic_protocol_fallback(self):
+        transport, process = self.transport()
+        os.write(process.output_write, b'Content-Length: 2\r\n\r\n{}')
+        client = ProtocolClient(transport)
+        with self.assertRaises(ProtocolUnknown): client.initialize()
+        self.assertEqual(transport.diagnostics()['failure_code'], 'INVALID_JSON_FRAME')
+        self.assertEqual([m['method'] for m in process.sent()], ['initialize'])
+
+    def test_stderr_capacity_stops_instead_of_unbounded_logging(self):
+        transport, process = self.transport()
+        transport._diag['stderr_bytes'] = 65530
+        os.write(process.stderr_write, b'harmless fixture diagnostic\n')
+        client = ProtocolClient(transport)
+        with self.assertRaises(ProtocolUnknown): client.initialize()
+        self.assertEqual(transport.diagnostics()['failure_code'], 'STDERR_CAPACITY')
+        self.assertEqual(process.sent(), [])  # Refused while draining, before stdin delivery.
+
+    def test_full_stderr_and_large_stdin_do_not_deadlock_write_phase(self):
+        transport, process = self.transport()
+        client = ProtocolClient(transport, timeout_s=1)
+        process.emit({'id': 1, 'result': INITIALIZE})
+        client.initialize()
+        process.sent()  # Remove only the already confirmed handshake.
+        errors, received = [], []
+        os.set_blocking(process.input_read, True)
+        def peer():
+            try:
+                warning = b'harmless warning\n' * 2048
+                offset = 0
+                while offset < len(warning): offset += os.write(process.stderr_write, warning[offset:])
+                payload = b''
+                while b'\n' not in payload: payload += os.read(process.input_read, 4096)
+                request = json.loads(payload.split(b'\n', 1)[0])
+                received.append(request['method'])
+                process.emit({'id': request['id'], 'result': THREAD_RESULT})
+            except (OSError, ValueError) as error:
+                errors.append(type(error).__name__)
+        worker = threading.Thread(target=peer, daemon=True)
+        worker.start()
+        try:
+            result = client.request('thread/start', {'developerInstructions': 'x' * 40000})
+            self.assertEqual(result['thread']['id'], 'thread-1')
+            worker.join(timeout=1)
+            self.assertFalse(worker.is_alive())
+            self.assertFalse(errors)
+            self.assertEqual(received, ['thread/start'])
+            self.assertGreater(transport.diagnostics()['stderr_bytes'], 8192)
+        finally:
+            transport.close()
 
 
 if __name__ == "__main__":

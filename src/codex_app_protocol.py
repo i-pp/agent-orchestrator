@@ -236,19 +236,29 @@ class ProtocolClient:
         self._init_attempted = False
         self._sequence = 0
         self._busy = False
+        self._diag = {'last_method': None, 'stage': 'constructed', 'failure_code': None,
+                      'initialize_acknowledged': False, 'initialized_notification_written': False}
+
+    def diagnostics(self):
+        return {**self._diag, 'initialized': self.initialized, 'initialize_attempted': self._init_attempted,
+                'request_sequence': self._sequence}
 
     def _exchange(self, message, *, notification=False):
         if self.exchange is None:
             raise ProtocolError("no transport configured")
         message = _json_copy(message, self.max_payload_bytes)
+        self._diag.update(last_method=message['method'], stage='exchange', failure_code=None)
         start = time.monotonic()
         try:
             response = self.exchange(message, self.timeout_s)
         except Exception as exc:
+            self._diag['failure_code'] = 'TRANSPORT_UNKNOWN'
             raise ProtocolUnknown("exchange failed; reconcile before any manual retry") from exc
         if time.monotonic() - start > self.timeout_s:
+            self._diag['failure_code'] = 'EXCHANGE_TIMEOUT'
             raise ProtocolUnknown("exchange deadline exceeded; outcome unknown")
         try:
+            self._diag['stage'] = 'response_validation'
             if notification:
                 if response is not None:
                     raise ProtocolError("notification must not receive a response")
@@ -265,10 +275,15 @@ class ProtocolClient:
                 if type(error["code"]) is not int or type(error["message"]) is not str:
                     raise ProtocolError("invalid RPC error")
                 raise RpcError(error["code"], error["message"])
-            return _result(message["method"], response["result"])
+            self._diag['stage'] = 'result_validation'
+            result = _result(message["method"], response["result"])
+            self._diag['stage'] = 'result_verified'
+            return result
         except RpcError:
+            self._diag['failure_code'] = 'SERVER_REJECTED'
             raise
         except ProtocolError as exc:
+            self._diag['failure_code'] = 'INVALID_RESULT_SCHEMA' if self._diag['stage'] == 'result_validation' else 'INVALID_RESPONSE_ENVELOPE'
             raise ProtocolUnknown("invalid acknowledgement; outcome unknown") from exc
 
     def initialize(self, client_info=None):
@@ -282,7 +297,9 @@ class ProtocolClient:
         _json_copy(params, self.max_payload_bytes)
         self._init_attempted = True
         result = self._request("initialize", params)
+        self._diag['initialize_acknowledged'] = True
         self._exchange({"method": "initialized"}, notification=True)
+        self._diag['initialized_notification_written'] = True
         self.initialized = True
         return result
 
@@ -365,6 +382,43 @@ class StdioTransport:
         self._buffer = b""
         self._read_selector = None
         self._write_selector = None
+        self._stderr_tail = b''
+        self._diag = {'stage': 'constructed', 'request_count': 0, 'stdout_bytes': 0,
+                      'stderr_bytes': 0, 'frames_received': 0, 'stderr_categories': [],
+                      'failure_code': None, 'termination_requested': False,
+                      'exit_code_before_close': None, 'reaped': False}
+
+    def diagnostics(self):
+        """Only fixed stages/counts/categories; never raw streams, paths or env."""
+        return json.loads(json.dumps(self._diag))
+
+    def _failure(self, code):
+        self._diag['failure_code'] = code
+
+    def _stderr(self):
+        try:
+            data = os.read(self._proc.stderr.fileno(), 4096)
+        except BlockingIOError:
+            return
+        if not data:
+            for selector in (self._read_selector, self._write_selector):
+                try:
+                    selector.unregister(self._proc.stderr)
+                except KeyError:
+                    pass
+            return
+        self._diag['stderr_bytes'] += len(data)
+        # Classify a bounded moving window, then discard all raw diagnostics.
+        sample = (self._stderr_tail + data).lower()
+        for marker, category in [(b'read-only file system', 'READ_ONLY_FILESYSTEM'),
+                (b'permission denied', 'PERMISSION_DENIED'), (b'error loading config', 'CONFIG_LOAD_ERROR'),
+                (b'address already in use', 'ADDRESS_IN_USE')]:
+            if marker in sample and category not in self._diag['stderr_categories']:
+                self._diag['stderr_categories'].append(category)
+        self._stderr_tail = sample[-128:]
+        if self._diag['stderr_bytes'] > 65536:
+            self._failure('STDERR_CAPACITY')
+            raise ProtocolUnknown('stderr diagnostic capacity exceeded')
 
     def bind_client(self, client):
         if self._active or self._started:
@@ -381,14 +435,19 @@ class StdioTransport:
         try:
             self._proc = subprocess.Popen(list(self.COMMAND), shell=False,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL, bufsize=0, close_fds=True)
+                stderr=subprocess.PIPE, bufsize=0, close_fds=True)
             os.set_blocking(self._proc.stdout.fileno(), False)
             os.set_blocking(self._proc.stdin.fileno(), False)
+            os.set_blocking(self._proc.stderr.fileno(), False)
             self._read_selector = selectors.DefaultSelector()
-            self._read_selector.register(self._proc.stdout, selectors.EVENT_READ)
+            self._read_selector.register(self._proc.stdout, selectors.EVENT_READ, 'stdout')
+            self._read_selector.register(self._proc.stderr, selectors.EVENT_READ, 'stderr')
             self._write_selector = selectors.DefaultSelector()
-            self._write_selector.register(self._proc.stdin, selectors.EVENT_WRITE)
+            self._write_selector.register(self._proc.stdin, selectors.EVENT_WRITE, 'stdin')
+            self._write_selector.register(self._proc.stderr, selectors.EVENT_READ, 'stderr')
+            self._diag['stage'] = 'started'
         except Exception as exc:
+            self._failure('PROCESS_START')
             self.close()
             raise ProtocolError("could not start fixed stdio executor") from exc
         return self
@@ -398,26 +457,35 @@ class StdioTransport:
             raise ProtocolError("stdio transport is not available")
 
     def _write(self, message, deadline):
+        self._diag['stage'] = 'writing'
         data = (json.dumps(_json_copy(message, self.max_frame_bytes), ensure_ascii=False,
                            allow_nan=False, separators=(",", ":")) + "\n").encode("utf-8")
         sent = 0
         while sent < len(data):
             remaining = deadline - time.monotonic()
-            if remaining <= 0 or not self._write_selector.select(remaining):
+            ready = self._write_selector.select(max(0, remaining)) if remaining > 0 else []
+            if not ready:
+                self._failure('WRITE_TIMEOUT')
                 raise ProtocolUnknown("stdio write deadline exceeded")
+            for key, _ in ready:
+                if key.data == 'stderr': self._stderr()
+            if not any(key.data == 'stdin' for key, _ in ready): continue
             try:
                 count = os.write(self._proc.stdin.fileno(), data[sent:])
             except BlockingIOError:
                 continue
             if count <= 0:
+                self._failure('STDIN_CLOSED')
                 raise ProtocolUnknown("stdio write disconnected")
             sent += count
 
     def _read(self, deadline):
+        self._diag['stage'] = 'reading'
         while True:
             if b"\n" in self._buffer:
                 line, self._buffer = self._buffer.split(b"\n", 1)
                 if len(line) > self.max_frame_bytes:
+                    self._failure('FRAME_CAPACITY')
                     raise ProtocolUnknown("stdio frame exceeds byte limit")
                 def unique(pairs):
                     result = {}
@@ -430,22 +498,35 @@ class StdioTransport:
                     message = json.loads(line, object_pairs_hook=unique,
                         parse_constant=lambda value: (_ for _ in ()).throw(ValueError("nonfinite JSON")))
                 except (ValueError, UnicodeError, RecursionError) as exc:
+                    self._failure('INVALID_JSON_FRAME')
                     raise ProtocolUnknown("invalid stdio JSON frame") from exc
                 if type(message) is not dict:
+                    self._failure('INVALID_FRAME_SHAPE')
                     raise ProtocolUnknown("stdio frame must be an object")
+                self._diag['frames_received'] += 1
+                self._diag['stage'] = 'frame_received'
                 return message
             if len(self._buffer) > self.max_frame_bytes:
+                self._failure('FRAME_CAPACITY')
                 raise ProtocolUnknown("stdio frame exceeds byte limit")
             remaining = max(0, deadline - time.monotonic())
-            if not self._read_selector.select(remaining):
+            ready = self._read_selector.select(remaining)
+            if not ready:
                 return None
-            try:
-                data = os.read(self._proc.stdout.fileno(), min(65536, self.max_frame_bytes + 1))
-            except BlockingIOError:
-                continue
-            if not data:
-                raise ProtocolUnknown("stdio disconnected before acknowledgement")
-            self._buffer += data
+            # Drain stderr before stdout EOF so startup failures retain safe facts.
+            for key, _ in ready:
+                if key.data == 'stderr': self._stderr()
+            for key, _ in ready:
+                if key.data != 'stdout': continue
+                try:
+                    data = os.read(self._proc.stdout.fileno(), min(65536, self.max_frame_bytes + 1))
+                except BlockingIOError:
+                    continue
+                if not data:
+                    self._failure('STDOUT_EOF')
+                    raise ProtocolUnknown("stdio disconnected before acknowledgement")
+                self._diag['stdout_bytes'] += len(data)
+                self._buffer += data
 
     def _event(self, message):
         _object(message, {"id", "method", "params", "jsonrpc"}, {"method"})
@@ -474,6 +555,8 @@ class StdioTransport:
             _params(method, message.get("params", {}))
         _json_copy(message, self.max_frame_bytes)
         deadline = time.monotonic() + timeout_s
+        self._diag['request_count'] += 1
+        self._diag['last_method'] = method
         self._active = True
         try:
             self._write(message, deadline)
@@ -481,9 +564,11 @@ class StdioTransport:
                 return None
             while True:
                 if time.monotonic() >= deadline:
+                    self._failure('RESPONSE_TIMEOUT')
                     raise ProtocolUnknown("stdio acknowledgement deadline exceeded")
                 response = self._read(deadline)
                 if response is None:
+                    self._failure('RESPONSE_TIMEOUT')
                     raise ProtocolUnknown("stdio acknowledgement deadline exceeded")
                 if "method" in response:
                     self._event(response)
@@ -492,9 +577,12 @@ class StdioTransport:
                 if (type(response["id"]) is not type(message["id"]) or response["id"] != message["id"]
                         or response.get("jsonrpc", "2.0") != "2.0"
                         or ("result" in response) == ("error" in response)):
+                    self._failure('RESPONSE_CORRELATION')
                     raise ProtocolUnknown("unexpected stdio acknowledgement")
+                self._diag['stage'] = 'response_received'
                 return response
         except Exception as exc:
+            if self._diag['failure_code'] is None: self._failure('EXCHANGE_' + self._diag['stage'].upper())
             self._broken = True
             raise ProtocolUnknown("stdio exchange failed; outcome unknown, no retry") from exc
         finally:
@@ -521,6 +609,7 @@ class StdioTransport:
                     return count
             return count
         except Exception as exc:
+            if self._diag['failure_code'] is None: self._failure('EVENT_STREAM')
             self._broken = True
             raise ProtocolUnknown("stdio event stream failed; outcome unknown") from exc
         finally:
@@ -530,18 +619,22 @@ class StdioTransport:
         if self._closed:
             return
         self._closed = True
+        self._stderr_tail = b''
+        if self._proc is not None:
+            self._diag['exit_code_before_close'] = self._proc.poll()
         for selector in (self._read_selector, self._write_selector):
             if selector is not None:
                 selector.close()
         if self._proc is None:
             return
-        for stream in (self._proc.stdin, self._proc.stdout):
+        for stream in (self._proc.stdin, self._proc.stdout, self._proc.stderr):
             if stream is not None:
                 try:
                     stream.close()
                 except OSError:
                     pass
         if self._proc.poll() is None:
+            self._diag['termination_requested'] = True
             self._proc.terminate()
             try:
                 self._proc.wait(timeout=self.shutdown_timeout_s)
@@ -550,3 +643,4 @@ class StdioTransport:
                 self._proc.wait(timeout=self.shutdown_timeout_s)
         else:
             self._proc.wait(timeout=self.shutdown_timeout_s)
+        self._diag['reaped'] = self._proc.poll() is not None

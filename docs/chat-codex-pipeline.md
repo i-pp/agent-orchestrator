@@ -66,7 +66,9 @@ rollbackは新flagを外して旧11操作の起動引数へ戻す。実行中tas
 
 2026-10-30の独立レビューで、steer ACKのturnId不一致と起動ACK前の承認要求の取りこぼしを検出し、両方を修正・fixtureで検証した。初期ACK前のturn ID欠落も成功/承認待ちへ採用しない。
 
-同日の許可済みmetadata読み取りprobeでは、通常の管理exec内で固定stdio app-server子プロセスを1回起動したが、initializeのACKを確認できずUNKNOWNで終了。account/readとmodel/listは送っておらず、認証種別・実モデル一覧・利用権・課金区分は未確認。子プロセスは回収済み、推論要求0、再試行0。stderrを破棄する現transportのため根本原因は未特定で、help/versionで見えたread-only PATH alias警告だけから認証/権限障害と断定しない。host native環境との同等性も未確認。保護領域・別credential・別実行権限へ切り替えていない。読取りprobeとturnを伴う追加sandbox作成を区別し、後者は実施しない。
+同日の許可済みmetadata読み取りprobeでは、通常の管理exec内で固定stdio app-server子プロセスを1回起動したが、initializeのACKを確認できずUNKNOWNで終了。account/readとmodel/listは送っておらず、認証種別・実モデル一覧・利用権・課金区分は未確認。子プロセスは回収済み、推論要求0、再試行0。当時のtransportはstderrを破棄しstdout原本/例外原因も保存しなかったため、根本原因は遡って特定できない。help/versionで見えたread-only PATH alias警告だけから認証/権限障害と断定しない。host native環境との同等性も未確認。保護領域・別credential・別実行権限へ切り替えていない。読取りprobeとturnを伴う追加sandbox作成を区別し、後者は実施しない。
+
+接続診断改修では、本文を保存せず、失敗段階・バイト数・固定stderr分類・子終了コード/回収を記録する。initialize ACK検証とinitialized通知送信を分け、EOF・JSON framing・response相関・result schema不一致・期限を区別する。stderrは64KiBで制限し、読取り中だけでなく大きなstdin書込み中も排出する。NDJSON/CRLF、分割UTF-8、partial write、stderr先行出力、schema不一致、LSP framing拒否をfake pipeで検証した。これらのfixture成功で旧probeの原因を確定したとは扱わず、実接続の限定再試行は別判断のまま保留する。
 
 | 成功条件 | 今回の範囲 |
 |---|---|
