@@ -270,6 +270,10 @@ class NativeParentAdapter:
         self._readonly_scope()
         return self.step()
 
+    def parent_result(self, request_ref, result):
+        from native_tool_driver import NativeToolDriver
+        return NativeToolDriver(self).record_parent_result(request_ref, result)
+
     def handoff_request(self, request_ref):
         self._readonly_scope()
         call = self.handoffs.read(request_ref)
@@ -293,13 +297,22 @@ class NativeParentAdapter:
             candidates = []
             for saved in self._config(state).get('captures', {}).values():
                 value = self.handoffs.read(saved['capture_ref'])
-                if value.get('provider_evidence', {}).get('state') != 'COMPLETED':
+                if (value.get('measurement_tool') != 'parent_standard_tool'
+                        and value.get('provider_evidence', {}).get('state') != 'COMPLETED'):
                     continue
                 request = self.handoffs.read(value['request'])
                 if request['tool'] != 'collaboration.list_agents':
                     continue
                 ids = value.get('effective_action_ids', request['action_ids'])
                 if len(ids) == 1 and self._action(ids[0])[1]['dispatch_id'] == action['dispatch_id']:
+                    if value.get('measurement_tool') == 'parent_standard_tool':
+                        rows = value['result']['agents']
+                        matched = [r['agent_status'] for r in rows
+                                   if r['agent_name'] == self._bound_agent(state, action)]
+                        if (len(matched) != 1 or not isinstance(matched[0], dict)
+                                or set(matched[0]) != {'completed'}
+                                or not isinstance(matched[0]['completed'], str)):
+                            continue
                     candidates.append(saved['capture_ref'])
             if len(candidates) != 1:
                 raise AdapterError('READONLY_CAPTURE_CORRELATION_REQUIRED')
@@ -313,11 +326,19 @@ class NativeParentAdapter:
         if (spawn_action['dispatch_id'] != action['dispatch_id']
                 or poll_action['dispatch_id'] != action['dispatch_id']
                 or poll['tool'] != 'collaboration.list_agents'
-                or capture.get('measurement_tool') != 'codex_app.read_thread'
+                or capture.get('measurement_tool') not in ['codex_app.read_thread', 'parent_standard_tool']
                 or capture_ref['key'] not in self._config(state).get('captures', {})):
             raise AdapterError('READONLY_CAPTURE_CORRELATION_REQUIRED')
         context = self.handoffs.read(spawn['context_ref'])
-        evidence = capture['provider_evidence']
+        if capture.get('measurement_tool') == 'parent_standard_tool':
+            rows = capture['result']['agents']
+            statuses = [r['agent_status'] for r in rows if r['agent_name'] == self._bound_agent(state, action)]
+            status = statuses[0] if len(statuses) == 1 else None
+            evidence = ({'state': 'COMPLETED', 'answer': status['completed']}
+                        if isinstance(status, dict) and set(status) == {'completed'}
+                        and isinstance(status['completed'], str) else {'state': 'UNKNOWN'})
+        else:
+            evidence = capture['provider_evidence']
         expected = {'context_sha256': spawn['context_ref']['sha256'],
                     'policy_version': context['policy']['version'],
                     'policy_sha256': context['policy']['sha256'], 'role': 'Researcher'}

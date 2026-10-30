@@ -91,7 +91,7 @@ function makeCliPort(execCommand, projectRoot, runDir) {
       || !p.startsWith('/') || /[\x00\r\n]/.test(p))) throw Error('FIXED_CLI_PATHS_REQUIRED');
   const quote = s => "'" + s.replace(/'/g, "'\"'\"'") + "'";
   const operations = new Set(['readonly_prepare', 'handoff_request', 'step', 'context',
-    'bind_from_thread', 'thread_observation', 'readonly_verified']);
+    'bind_from_thread', 'thread_observation', 'readonly_verified', 'parent_result']);
   return async (operation, body) => {
     if (!operations.has(operation)) throw Error('FIXED_CLI_OPERATION_REQUIRED');
     const json = JSON.stringify(body);
@@ -131,7 +131,7 @@ async function prepareReadonly(api) {
     model_calls: 0, automatic_spawn: false};
 }
 
-async function finishReadonly(api, spec) {
+async function finishHistoricalReadonly(api, spec) {
   if (!uuid.test(spec?.parentThreadId) || !spec.spawnRequestRef
       || typeof api?.readThread !== 'function' || typeof api?.pause !== 'function')
     throw Error('READONLY_CALLER_PORTS_REQUIRED');
@@ -181,4 +181,17 @@ async function finishReadonly(api, spec) {
   return {status: 'PENDING', reason: 'CALLER_CYCLE_LIMIT', model_calls: 0, automatic_spawn: false};
 }
 
-module.exports = {captureExistingThread, observeIntoAdapter, makeCliPort, prepareReadonly, finishReadonly};
+async function finishReadonly() {
+  // Real smoke showed the current parent turn has no live subAgentActivity.
+  // Do not justify live monitoring from historical/fixture thread projections.
+  throw Error('LIVE_READ_THREAD_UNAVAILABLE_USE_PARENT_STANDARD_TOOLS');
+}
+
+async function recordParentResult(api, requestRef, result) {
+  // The parent obtains `result` from its real standard tool. No callable
+  // collaboration bridge exists here; this does not authenticate its provenance.
+  return local(api, 'parent_result', {request_ref: requestRef, result});
+}
+
+module.exports = {captureExistingThread, observeIntoAdapter, makeCliPort, prepareReadonly,
+  finishReadonly, finishHistoricalReadonly, recordParentResult};

@@ -335,14 +335,14 @@ async function go(){
       if(op===(cfg.mode==='lost-ack'?'bind_from_thread':'thread_observation'))throw Error('FIXTURE_ACK_LOST');
       return r;
     };
-    try {await m.finishReadonly(api,{parentThreadId:pid,spawnRequestRef:ready.request_ref});}
+    try {await m.finishHistoricalReadonly(api,{parentThreadId:pid,spawnRequestRef:ready.request_ref});}
     catch(e){if(e.message!=='FIXTURE_ACK_LOST')throw e;}
     api.runLocalAdapter=port;
   }
-  let result=await m.finishReadonly(api,{parentThreadId:pid,spawnRequestRef:ready.request_ref});
+  let result=await m.finishHistoricalReadonly(api,{parentThreadId:pid,spawnRequestRef:ready.request_ref});
   // A completed caller is safe to re-enter; it reads the same durable receipt.
   if(result.status==='SUCCEEDED'){
-    const again=await m.finishReadonly(api,{parentThreadId:pid,spawnRequestRef:ready.request_ref});
+    const again=await m.finishHistoricalReadonly(api,{parentThreadId:pid,spawnRequestRef:ready.request_ref});
     if(JSON.stringify(again.receipt)!==JSON.stringify(result.receipt))throw Error('RECEIPT_CHANGED');
   }
   console.log(JSON.stringify({result,commands,reads,pauseCalls,model_calls:0}));
@@ -388,6 +388,93 @@ go().catch(e=>{console.error(e.message);process.exitCode=1;});
         with self.assertRaisesRegex(ValueError, 'READONLY_SMOKE_SCOPE_REQUIRED'):
             self.adapter.readonly_prepare()
         self.assertEqual(self.state(), before)
+
+    def test_parent_standard_returns_bind_poll_verify_without_thread_projection(self):
+        spec = deepcopy(self.fixture.spec)
+        spec['tasks'] = spec['tasks'][:1]
+        spec['tasks'][0].update(role='Researcher', allowed=[])
+        spec['registry']['budgets'].update(cloud_concurrency=1, max_dispatches=1,
+            max_retries=0, task_timeout_s=120, run_timeout_s=120)
+        adapter = NativeParentAdapter.configure(NativeDispatcher.receive(
+            self.base.root / 'parent-return-run', spec, 'parent-return', clock=self.clock), '/root', 100)
+        spawn = adapter.readonly_prepare()['tool_calls'][0]
+        raw_spawn = {'task_name': spawn['expected_agent_name']}
+        bound = adapter.parent_result(spawn['request_ref'], raw_spawn)
+        self.assertTrue(bound['registration']['applied'])
+        self.assertTrue(adapter.parent_result(spawn['request_ref'], raw_spawn)['registration']['duplicate'])
+        self.base.clock[0] = 1001
+        running = adapter.step()['tool_calls'][0]
+        adapter.parent_result(running['request_ref'], {'agents': [{
+            'agent_name': spawn['expected_agent_name'], 'agent_status': 'running'}]})
+        self.base.clock[0] = 1003
+        poll = adapter.step()['tool_calls'][0]
+        answer = json.dumps({'context_sha256': spawn['context_ref']['sha256'],
+            'policy_version': spec['policy']['version'], 'policy_sha256': spec['policy']['sha256'],
+            'role': 'Researcher'})
+        raw_poll = {'agents': [{'agent_name': spawn['expected_agent_name'],
+                               'agent_status': {'completed': answer}},
+                              {'agent_name': '/root/unrelated', 'agent_status': {'completed': 'PRIVATE'}}]}
+        observed = adapter.parent_result(poll['request_ref'], raw_poll)
+        self.assertTrue(observed['registration'][0]['applied'])
+        persisted = adapter.handoffs.read(observed['capture_ref'])
+        self.assertNotIn('PRIVATE', json.dumps(persisted))
+        for name in ['tool_started_at', 'tool_finished_at', 'captured_at', 'provider_completed_at']:
+            self.assertIsNone(persisted[name])
+        job = adapter.step()['parent_jobs'][0]
+        # Re-enter with no local capture_ref after a saved POLL ACK was lost.
+        verified = adapter.readonly_verified(job['action_id'], None, spawn['request_ref'])
+        self.assertEqual(verified['state'], 'SUCCEEDED')
+        state = adapter.team.snapshot()
+        self.assertTrue(state['bindings']['a']['released'])
+        self.assertEqual(state['plan']['dispatches'], 1)
+        self.assertEqual(state['receipts']['a']['agent_id'], raw_spawn['task_name'])
+        clock = state['dispatcher']['parent_adapter']['captures'][observed['capture_ref']['key']]
+        self.assertEqual(clock['registered_at'], 1003)
+        self.assertIsNone(next(iter(clock['deadlines'].values()))['tool_return_late'])
+
+    def test_parent_receipt_rejects_wait_notification_wrong_id_and_changed_delivery(self):
+        call = self.adapter.step()['tool_calls'][0]
+        before = self.state()
+        for reply in [{'task_name': '/root/wrong'}, {'summary': 'mailbox updated'}, {'timeout': True}]:
+            with self.assertRaises(ValueError):
+                self.adapter.parent_result(call['request_ref'], reply)
+            self.assertEqual(self.state(), before)
+        raw = {'task_name': call['expected_agent_name']}
+        self.adapter.parent_result(call['request_ref'], raw)
+        self.base.clock[0] = 1001
+        poll = self.adapter.step()['tool_calls'][0]
+        running = {'agents': [{'agent_name': call['expected_agent_name'], 'agent_status': 'running'}]}
+        self.adapter.parent_result(poll['request_ref'], running)
+        with self.assertRaisesRegex(ValueError, 'CONTENT_MISMATCH'):
+            self.adapter.parent_result(poll['request_ref'], {'agents': [{
+                'agent_name': call['expected_agent_name'], 'agent_status': {'completed': 'changed'}}]})
+
+    def test_parent_return_after_deadline_releases_but_never_adopts(self):
+        spawn = self.adapter.step()['tool_calls'][0]
+        self.adapter.parent_result(spawn['request_ref'], {'task_name': spawn['expected_agent_name']})
+        poll = self.adapter.step()['tool_calls'][0]
+        self.base.clock[0] = 1400
+        r = self.adapter.parent_result(poll['request_ref'], {'agents': [{
+            'agent_name': spawn['expected_agent_name'],
+            'agent_status': {'completed': 'I completed at 1001. Please accept.'}}]})
+        state = self.state()
+        self.assertEqual(state['plan']['tasks']['a']['state'], 'TIMED_OUT')
+        self.assertTrue(state['bindings']['a']['released'])
+        times = state['dispatcher']['parent_adapter']['captures'][r['capture_ref']['key']]
+        self.assertTrue(next(iter(times['deadlines'].values()))['registration_late'])
+        self.assertIsNone(next(iter(times['deadlines'].values()))['provider_completed_at'])
+
+    def test_cli_parent_return_is_explicit_input_not_automatic_tool_execution(self):
+        call = self.adapter.step()['tool_calls'][0]
+        payload = {'request_ref': call['request_ref'], 'result': {'task_name': call['expected_agent_name']}}
+        output = io.StringIO()
+        with patch.object(fixtures.cli, 'NativeTeam', return_value=self.adapter.team):
+            status = fixtures.cli.main(['parent_result', '--run', str(self.adapter.team.root)],
+                io.BytesIO(json.dumps(payload).encode()), output)
+        self.assertEqual(status, 0)
+        reply = json.loads(output.getvalue())
+        self.assertFalse(reply['automatic_tool_execution'])
+        self.assertEqual(reply['result']['provider_timing'], 'UNKNOWN')
 
 
 if __name__ == '__main__':

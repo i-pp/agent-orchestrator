@@ -25,6 +25,7 @@ FIELDS = {
     'readonly_prepare': set(),
     'handoff_request': {'request_ref'},
     'readonly_verified': {'action_id', 'capture_ref', 'spawn_request_ref'},
+    'parent_result': {'request_ref', 'result'},
 }
 MAX_INPUT = 65536
 

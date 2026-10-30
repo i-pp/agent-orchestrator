@@ -27,6 +27,48 @@ class NativeToolDriver:
             captures.append(self.execute(call))
         return {'step': step, 'captures': captures, 'automatic_wake': False}
 
+    def record_parent_result(self, request_ref, result):
+        """Register a parent's actual standard-tool return, without calling it.
+
+        This receipt preserves local integrity, not provider authenticity. There
+        is no API to pipe a collaboration return into Code Mode automatically.
+        Unknown native timings stay unknown; registration time is authoritative.
+        """
+        call = self.store.read(request_ref)
+        tool = call['tool']
+        expected = {'collaboration.spawn_agent': 'SPAWN', 'collaboration.list_agents': 'POLL'}
+        if tool not in expected:
+            raise ValueError('PARENT_RETURN_SCHEMA_UNVERIFIED')
+        ids = call['action_ids']
+        if not ids or request_ref['key'] != sha(ids) or call['arguments_sha256'] != sha(call['arguments']):
+            raise ValueError('CALL_ARGUMENTS_CHANGED')
+        self.adapter._call(tool, call['arguments'], ids)
+        for action_id in ids:
+            self.adapter._action(action_id, expected[tool])
+        encoded(result)
+        original_hash = sha(result)
+        if tool == 'collaboration.spawn_agent':
+            if (len(ids) != 1 or not isinstance(result, dict) or set(result) != {'task_name'}
+                    or result['task_name'] != call['expected_agent_name']):
+                raise ValueError('SPAWN_RESULT_SCOPE_MISMATCH')
+        else:
+            if (not isinstance(result, dict) or set(result) != {'agents'} or not isinstance(result['agents'], list)
+                    or any(not isinstance(r, dict) or set(r) != {'agent_name', 'agent_status'}
+                           or not isinstance(r['agent_name'], str) for r in result['agents'])):
+                raise ValueError('UNSUPPORTED_INVENTORY_RESULT')
+            wanted = {self.adapter._action(i, 'POLL')[1]['agent_id'] for i in ids}
+            result = {'agents': [r for r in result['agents'] if r['agent_name'] in wanted]}
+        # No fabricated start/end/provider clock. A repeated identical delivery
+        # has identical bytes, even after an ACK was lost. A changed one conflicts.
+        reference = self.store.put('result', request_ref['key'], {
+            'request': request_ref, 'measurement_tool': 'parent_standard_tool',
+            'tool_started_at': None, 'tool_finished_at': None, 'captured_at': None,
+            'provider_completed_at': None, 'raw_response_sha256': original_hash,
+            'result': result, 'error_type': None, 'arguments_mutated': False})
+        return {'capture_ref': reference, 'registration': self.ingest(reference),
+                'source': 'parent_standard_tool', 'automatic_tool_execution': False,
+                'provider_timing': 'UNKNOWN'}
+
     def execute(self, call):
         if not callable(self.port):
             raise ValueError('STANDARD_TOOL_PORT_NOT_CONNECTED')
@@ -97,7 +139,10 @@ class NativeToolDriver:
         call = {**call, 'action_ids': effective}
         started, finished, captured = (capture[k] for k in ['tool_started_at', 'tool_finished_at', 'captured_at'])
         now = self.adapter.team.clock()
-        if not started <= finished <= captured <= now:
+        parent_return = capture.get('measurement_tool') == 'parent_standard_tool'
+        if parent_return and (started, finished, captured) != (None, None, None):
+            raise ValueError('PARENT_RETURN_CLOCK_MUST_REMAIN_UNKNOWN')
+        if not parent_return and not started <= finished <= captured <= now:
             raise ValueError('CAPTURE_CLOCK_ORDER_UNKNOWN')
         facts = {}
         for action_id in call['action_ids']:
@@ -107,7 +152,7 @@ class NativeToolDriver:
             deadline = min(task['started'] + budgets['task_timeout_s'],
                            state['plan']['run_started'] + budgets['run_timeout_s'])
             evidence = capture.get('provider_evidence', {})
-            facts[action_id] = {'deadline_at': deadline, 'tool_return_late': finished >= deadline,
+            facts[action_id] = {'deadline_at': deadline, 'tool_return_late': None if parent_return else finished >= deadline,
                                 'registration_late': now >= deadline,
                                 'provider_completed_at': evidence.get('provider_completed_at')}
         def log(journal, data, at):

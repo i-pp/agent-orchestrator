@@ -1,5 +1,38 @@
 # 親が継続する標準ツールadapter
 
+## 現行候補：親の標準tool返値を直接登録する
+
+実smokeで、`read_thread`の現在の親turnに`subAgentActivity`が表示されず、起動した子との対応を解決できなかった。子は指定JSONを返したが、callerはBLOCKED、品質不採用のまま回収した。過去threadの読取り成功やfixtureのPASSを、ライブ監視が利用可能な証拠にはしない。
+
+このセッションのcollaboration toolはCode Modeの`tools`へ公開されておらず、関数内から直接呼べない。**親モデルが標準toolの境界をまたぐ**方式を採用する。CLIは起動・常駐wakeを実行しない。
+
+1. `step`または単発read-only用の`readonly_prepare`がcanonical descriptorを永続化する。親が標準`collaboration.spawn_agent`を一度呼ぶ。
+2. 実返値`{"task_name":"/root/..."}`を、そのdescriptorの`request_ref`とともに`parent_result`へ渡す。IDは実返値を使い、期待名から成功を推測しない。登録は固定requestとscopeを照合してbindする。
+3. `step`からPOLL descriptorを得て、親が標準`collaboration.list_agents`を呼ぶ。返値`{"agents":[{"agent_name":"/root/...","agent_status":...}]}`を同じ`parent_result`入口へ渡す。`running`と`{"completed":"応答本文"}`が観測済みschema。対象なし/重複/未知statusは終了とせずUNKNOWNにする。無関係Agentの本文は保存しない。
+4. `wait_agent`は必要なら親が通知待ちに使うだけ。返すのはmailbox更新/timeoutの要約であり、Agent応答の取得や終了証拠ではない。wait後にも実際の`list_agents`返値で照合する。
+5. 終了観測後のVERIFYを親が処理する。固定read-only課題なら`readonly_verified`が保存済みcompletion receiptを用いてcontext/policy/role JSONとGit scopeを検査する。一般の実装成果は既存`verified`で要求に基づく別の検査を記録する。
+
+CLIの追加操作は次の1つ。任意command/path/toolを起動する受付ではない。
+
+```bash
+python3 -B scripts/native_parent.py parent_result --run "$RUN_DIR" < native-result.json
+```
+
+`native-result.json`は`request_ref,result`の2キーだけ。`result`は**親が実際の標準toolから受け取った値**であり、fixtureや期待値を実応答として渡してはならない。`recordParentResult`というJS helperも、この値を固定CLIへ渡すだけ。標準toolからCode Modeへの自動配線があるとは主張しない。
+
+保存receiptはrequest hash・実返値hash・canonical Agent名・最初のローカル登録時刻を対応付ける。parent標準toolの開始/終了やprovider完了時刻はこの経路では取得できないためnull/UNKNOWNのまま残す。モデル本文の時刻を使わず、deadlineは登録・検証時の実時計で守る。遅いcompletionは品質採用せず、終了確認後だけ枠を解放する。
+
+同じ返値の再登録は冪等、内容競合は拒否。ACK喪失時は同じ保存receiptで照合し、標準toolを無条件再実行しない。返値を取得できなかったSPAWNは未解決のISSUEDとして保持し、stepを繰り返しても再spawnしない。receiptのhashは改変検出であり、provider由来や親による正確な転送を暗号学的に証明するものではない。
+
+| 判定 | 範囲 |
+|---|---|
+| 可能 | 親の標準spawn/list→明示receipt登録→既存依存/期限/枠管理→親検証。schemaは公開定義と保存済み実tool返値で確認。コード/CLI契約は無モデル検査済み |
+| 不可（現在の公開境界） | Code Modeからcollaborationを直接呼ぶこと、waitの要約をcompletionとして扱うこと、現在turnのread_thread表示をライブ対応情報として要求すること |
+| 未確認 | 今回のparent_result経路での新しい実smoke、raw interrupt/errorの機械schema、別runtimeでの互換性 |
+| DEFERRED | 親turn終了後の自動wake/常駐、標準tool返値からhost receiptへの自動配線、OS強制timeout |
+
+通常の`finishReadonly`はapp/CLIへ触る前に`LIVE_READ_THREAD_UNAVAILABLE_USE_PARENT_STANDARD_TOOLS`で停止する。旧関数は`finishHistoricalReadonly`へ改名し、過去thread/fixture検証用に限って残した。以下の旧v3/v2記述は履歴であり、新しいlive実行手順として使わない。
+
 ## v3の修正候補（未反映・実モデル再試験なし）
 
 単発smokeで、長文の転記差分と親の観測登録遅延が発生した。v3は本文を専用run内のimmutableファイルへ固定し、標準spawnには`context` CLIで読む短い指示とSHA-256だけを渡す。ファイル・bootstrap・呼出し引数の不一致は機械portの呼出し前に拒否する。`fork_turns=none`は維持する。v1/v2の保存runは黙って移行せず、失敗結果を書き換えない。

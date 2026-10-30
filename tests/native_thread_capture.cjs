@@ -1,7 +1,7 @@
 'use strict';
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {captureExistingThread,observeIntoAdapter,makeCliPort,prepareReadonly} = require('../scripts/native_thread_capture.cjs');
+const {captureExistingThread,observeIntoAdapter,makeCliPort,prepareReadonly,finishReadonly,recordParentResult} = require('../scripts/native_thread_capture.cjs');
 const parentId='00000000-0000-4000-8000-000000000001';
 const childId='00000000-0000-4000-8000-000000000002';
 const turnId='00000000-0000-4000-8000-000000000003';
@@ -133,4 +133,21 @@ test('Code Mode module and fixed CLI use no Node or TextEncoder globals',async()
   await port('step',{});
   await assert.rejects(()=>port('step',{body:'日本語'.repeat(8000)}),/SIZE_LIMIT/);
   assert.equal(calls,1);
+});
+test('live read_thread caller is disabled before any adapter or app read',async()=>{
+  let calls=0;
+  await assert.rejects(()=>finishReadonly({runLocalAdapter:()=>calls++,readThread:()=>calls++},{}),
+    /LIVE_READ_THREAD_UNAVAILABLE/);
+  assert.equal(calls,0);
+});
+test('parent standard return ingress preserves the supplied value without claiming a tool bridge',async()=>{
+  const result={task_name:'/root/fixture_agent'}, ref={kind:'request'}, received=[];
+  const api={runLocalAdapter:async(op,body)=>{
+    received.push({op,body});return {status:'OK',operation:op,result:{automatic_tool_execution:false}};
+  }};
+  const receipt=await recordParentResult(api,ref,result);
+  assert.equal(received[0].op,'parent_result');
+  assert.equal(received[0].body.result,result);
+  assert.equal(received[0].body.request_ref,ref);
+  assert.equal(receipt.automatic_tool_execution,false);
 });
