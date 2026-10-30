@@ -10,7 +10,9 @@
 
 [公式state説明](https://learn.chatgpt.com/docs/config-file/config-advanced#config-and-state-locations)と[環境変数説明](https://learn.chatgpt.com/docs/config-file/environment-variables)では、CODEX_HOMEはconfig/auth/log/session/cache等の既存state root、SQLITE_HOMEはSQLite stateの配置先。通常hostでは既存stateへの正規アクセスが必要になる。log/session/SQLite/socketの全てがmetadata probe起動時に必須であるとは断定しない。CODEX_HOMEを一時領域へ移しauthをコピーする方法は今回採用しない。
 
-もう一つの実装不足は実行ファイルの選択。既存serviceは`env -i`でPATHを`/usr/bin:/bin`へ固定し、daemonには承認済み絶対binary pathを渡している。一方、現在のpipeline候補はtunnel配下のadapterでPATH上の`codex`を起動する。npm配下のCLIがそのPATHにあるとは限らず、tunnelの既存256MiB枠にexecutorも入る。現候補のflagをそのまま現用へ付ける手順は不適切。
+初期候補には実行ファイルの選択にも不足があった。既存serviceは`env -i`でPATHを`/usr/bin:/bin`へ固定するため、PATH上のnpm CLIをtunnel配下で起動する方式は適切ではない。改修後はdaemonへ既存の絶対binary参照を渡し、`codex-pipeline-executor.json`のhashと照合してnative ELFを起動する。tunnelの256MiB枠へexecutorを入れない。
+
+既存service記録のbinaryはVS Code同梱0.164.0-alpha.11.1、初期schema確認はnpm 0.165.0だった。既存binaryでもgenerate-json-schemaを実行し、関連26schema中20がbyte一致、残りは未解釈CodexErrorInfoのvariant差分で、使用要求と応答必須fieldsは一致と確認。server起動はしていない。両確認版以外はversion gateで拒否する。host probeと配備では既存serviceのbinary参照を維持し、npm版へ黙って切り替えない。
 
 ## 配備先と境界
 
@@ -25,13 +27,13 @@ Chat -> 既存認証Tunnel -> MCP Adapter（12操作を検証）
 
 同じhost UID・既存Codex login/state・既存Tunnel key参照を使う。keyの値やauthを引数/環境変数へコピーしない。daemonは既存の512MiB/TasksMax枠、tunnelは256MiBのまま。必要なheadroomが未確認ならBLOCKEDにし、無断で増枠しない。新規port、外部WebSocket、systemd/host security変更、linger追加は不要。既存の外向きTunnel接続とCodex認証/metadata/推論の既存通信は残る。
 
-既存daemonのcontrol APIは現在status/list/submit/cancel等で、新pipelineの12操作を直接転送する機能はまだない。この図のdaemon gateway接続は**実装待ち**。既存runnerがapp-serverを起動する構造や、control_socket/transport/resources/cleanupを再利用するが、既存submitが新thread/task APIを提供するとは扱わない。
+この図の転送はfeature候補へ実装済み。`DaemonPipelineProxy`が既存UID socketへ固定`codex_pipeline` envelopeを送り、daemonが12tool名/argument schemaを再検証して`HostGateway`へ渡す。自由なapp-server RPC proxyではない。既存submitの意味は変更せず、default OFFで従来のscopeを保つ。実host socketによる疎通はまだ未検証。
 
-実装差分を最小にするための残り3点：
+実装した3点と検証範囲：
 
-1. 運用者が承認したnative binaryの絶対path/hashと既存CODEX_HOMEをhost preflightで確認。read-only/UNKNOWNな実行環境は拒否し、別homeや別credentialへfallbackしない。
-2. daemonがgatewayと既知thread/turn、queue/tick、interrupt、子/子孫回収を所有。Adapterは既存UID socketに固定12操作だけを渡す。shell/path/provider等の自由なRPC proxyは追加しない。native実行と既存jobは共有budgetで排他（初期はpipeline同時1＋既存job稼働中は新dispatch待機）。現prototypeのchildだけcloseする実装で、任意子孫の回収まで実証したとは扱わない。
-3. 新capability flagのdaemon/adapter双方への伝播、poc_servicesのplan/preflight/recovery、poc_loginのpinとtool数検証を更新。現在のloginは11操作を固定確認するため、23操作を既に復元できるとは扱わない。起動引数だけ手編集してこれを飛ばさない。
+1. 運用者の既存native binary path/hashとCODEX_HOMEをhost preflightで確認。read-only/UNKNOWNは起動前拒否、別home/credentialへfallbackなし。新executor設定は0600 owner fileでhashのみ、pathは既存daemon参照を再利用する。
+2. daemonがgateway/queue/tick/interruptを所有し、通常runnerと同じrunner.lockで排他。初期pipeline同時1、通常job稼働中は入力をqueueへ保持。paused/UNKNOWN/cleanup未確認時は新turnを開始しない。nativeは専用process groupで、PID/start-tokenを確認してreparentされた同group子も採録し、TERM/KILLと不在確認を行う。markerはfork前にfsyncし、crash/回収未確認はUNKNOWN保持。legacy runnerの両経路も未解放marker/ledgerを拒否する。OS全体の任意processや、観測前にgroup外へ完全離脱した子まで制御できると保証しない。実hostでのresource headroom/回収は未検証。
+3. default OFF flagをdaemon/adapter双方へ伝播し、poc_servicesのplan/preflight/recovery/startとpipeline-only rollback、poc_loginの4hash pinと11/23操作照合を実装。OFFの旧login pin bytesは維持する。実unitの配置・pin書換え・再起動は行っていない。
 
 ## 第1段階：通常hostの固定read probe
 
@@ -62,4 +64,6 @@ account=chatgptとmodel一覧が取れても課金額・model利用権は未検�
 
 ## Offline確認
 
-host probeはfake transportのみで、HOST不明/管理sandbox/readonly state/hash不一致/wrapperを起動前拒否し、4つの固定protocol message、認証更新なし、重複receipt拒否を検証する。実host probe・daemon gateway転送・23操作の現用起動・実推論は未検証。この手順書とunit fixtureのPASSは配備完了を意味しない。
+host probeはfake transportのみで、HOST不明/管理sandbox/readonly state/hash不一致/wrapperを起動前拒否し、4つの固定protocol message、認証更新なし、重複receipt拒否を検証する。gateway/共有lease/UNKNOWN/paused/reparent cleanup/legacy admission/service flags/login pin/rollbackもofflineで確認。実host probe・実socket転送・23操作の現用起動・実推論は未検証。この手順書とunit fixtureのPASSは配備完了を意味しない。
+
+既存test_runnerの実行系13件は、この管理execで元のversion確認用isolation guardに止まり期待stateと一致しない。変更前のrunner対照でも同じNESTED_ISOLATION_FORBIDDEN・fake executor起動0を確認した。テストをskip/弱体化したり、追加isolationを実行して通したりしていない。新gatewayのfake executor検証と、この旧runnerの環境依存失敗は分けて記録する。

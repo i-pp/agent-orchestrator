@@ -12,7 +12,7 @@ from unittest.mock import patch
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "src"))
 from codex_app_protocol import (ALLOWED_METHODS, METHOD_SCHEMAS, SCHEMA_SHA256,
-    SCHEMA_VERSION, ProtocolClient, ProtocolError, ProtocolUnknown, RpcError, StdioTransport)
+    SCHEMA_VERSION, ProtocolClient, ProtocolError, ProtocolUnknown, RpcError, StdioTransport, schema_version_supported)
 
 INITIALIZE = {"codexHome": "/offline/codex", "platformFamily": "unix",
               "platformOs": "linux", "userAgent": "codex/0.165.0"}
@@ -50,6 +50,11 @@ class Peer:
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_only_inspected_schema_versions_are_accepted(self):
+        for agent in ['codex/0.165.0', 'codex_cli_rs/0.164.0-alpha.11.1 (Linux)']:
+            self.assertTrue(schema_version_supported(agent))
+        for agent in ['codex/0.165.01', 'codex/0.165.0-alpha.2', 'codex/0.164.0-alpha.11.11', 'unknown', None]:
+            self.assertFalse(schema_version_supported(agent))
     def client(self, **kwargs):
         peer = Peer()
         client = ProtocolClient(peer, **kwargs)

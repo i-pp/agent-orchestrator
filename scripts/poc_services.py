@@ -64,9 +64,11 @@ def credential_metadata(path):
 
 
 class Services:
-    def __init__(self, runtime=RUNTIME, codex=CODEX, key_file=KEY, allow_local_llm=False, allow_local_models=False, allow_chat_mailbox=False, allow_mailbox_grants=False):
+    def __init__(self, runtime=RUNTIME, codex=CODEX, key_file=KEY, allow_local_llm=False, allow_local_models=False, allow_chat_mailbox=False, allow_mailbox_grants=False, allow_codex_pipeline=False):
         if allow_mailbox_grants and not allow_chat_mailbox:
             raise Refused('Mailbox grants require the chat mailbox capability')
+        if type(allow_codex_pipeline) is not bool:
+            raise Refused('Pipeline capability flag must be boolean')
         self.root = Path(runtime).expanduser().absolute()
         if (self.root.parent != PROJECT/'.runtime' or not re.fullmatch(r'development-poc-[A-Za-z0-9_-]{1,80}', self.root.name)
                 or any(p.is_symlink() for p in [self.root, *self.root.parents])):
@@ -87,6 +89,19 @@ class Services:
         self.allow_local_models = allow_local_models
         self.allow_chat_mailbox = allow_chat_mailbox
         self.allow_mailbox_grants = allow_mailbox_grants
+        self.allow_codex_pipeline = allow_codex_pipeline
+
+    def pipeline_snapshot(self, expected=None):
+        """Read fixed executor/policy metadata; no executor or auth startup."""
+        from codex_host import executor_snapshot
+        value = executor_snapshot(self.root, self.codex)
+        keys = {'executor_policy_sha256', 'pipeline_policy_sha256', 'common_policy_sha256', 'binary_sha256'}
+        if (not isinstance(value, dict) or set(value) != keys
+                or any(not isinstance(v, str) or not re.fullmatch('[a-f0-9]{64}', v) for v in value.values())):
+            raise Refused('Invalid pipeline executor snapshot')
+        if expected is not None and value != expected:
+            raise Refused('Pipeline executor or policy hash differs from the recorded invocation')
+        return value
 
     @contextmanager
     def locked(self):
@@ -129,6 +144,12 @@ class Services:
                 or set(value['invocations']) - set(self.units)
                 or value.get('phase') not in ['STARTING', 'READY', 'STOPPED', 'FAILED', 'CLEANUP_UNCONFIRMED']
                 or type(value.get('mailbox_grants_enabled', False)) is not bool
+                or type(value.get('codex_pipeline_enabled', False)) is not bool
+                or (value.get('codex_pipeline_enabled', False) and (
+                    not isinstance(value.get('codex_pipeline_snapshot'), dict)
+                    or set(value['codex_pipeline_snapshot']) != {'executor_policy_sha256', 'pipeline_policy_sha256', 'common_policy_sha256', 'binary_sha256'}
+                    or any(not isinstance(v, str) or not re.fullmatch('[a-f0-9]{64}', v)
+                           for v in value['codex_pipeline_snapshot'].values())))
                 or (value.get('mailbox_grants_enabled', False) and value.get('chat_mailbox_enabled') is not True)):
             raise Refused('State ownership record is invalid')
         return value
@@ -162,24 +183,30 @@ class Services:
             credential_metadata(self.key)
             key['acceptable'] = not self.key.is_relative_to(PROJECT)
         except (OSError, Refused): pass
-        return {'runtime': str(self.root), 'mode': MODE, 'units': self.units, 'key_metadata': key,
+        result = {'runtime': str(self.root), 'mode': MODE, 'units': self.units, 'key_metadata': key,
                 'credential_reader_uid': os.getuid(), 'credential_transport': 'native file: reference; no copy or environment value',
                 'state_file': str(self.root/STATE), 'logs': str(self.root/'logs'), 'health_file': str(self.health),
                 'automatic_start': False, 'survives_terminal_close': True, 'survives_logout_or_reboot': False, 'local_llm_enabled': self.allow_local_llm, 'local_models_enabled': self.allow_local_models,
                 'chat_mailbox_enabled': getattr(self, 'allow_chat_mailbox', False),
-                'mailbox_grants_enabled': getattr(self, 'allow_mailbox_grants', False)}
+                'mailbox_grants_enabled': getattr(self, 'allow_mailbox_grants', False),
+                'codex_pipeline_enabled': getattr(self, 'allow_codex_pipeline', False)}
+        if result['codex_pipeline_enabled']:
+            result['codex_pipeline_snapshot'] = self.pipeline_snapshot()
+        return result
 
     def commands(self):
         if getattr(self, 'allow_mailbox_grants', False) and not getattr(self, 'allow_chat_mailbox', False):
             raise Refused('Mailbox grants require the chat mailbox capability')
         daemon = ['/usr/bin/python3', '-B', str(PROJECT/'src/runner.py'), '--runtime', str(self.root),
-                  '--codex', str(self.codex), '--development-poc', 'daemon']
+                  '--codex', str(self.codex), '--development-poc',
+                  *(['--allow-codex-pipeline'] if getattr(self, 'allow_codex_pipeline', False) else []), 'daemon']
         adapter = shlex.join(['/usr/bin/env', '-u', 'CONTROL_PLANE_API_KEY', '-u', 'OPENAI_API_KEY', '-u', 'OPENAI_ADMIN_KEY',
                              '/usr/bin/python3', '-B', str(PROJECT/'src/mcp_adapter.py'), '--runtime', str(self.root),
                              *(['--allow-local-llm'] if self.allow_local_llm else []),
                              *(['--allow-local-models'] if getattr(self, 'allow_local_models', False) else []),
                              *(['--allow-chat-mailbox'] if getattr(self, 'allow_chat_mailbox', False) else []),
-                             *(['--allow-mailbox-grants'] if getattr(self, 'allow_mailbox_grants', False) else [])])
+                             *(['--allow-mailbox-grants'] if getattr(self, 'allow_mailbox_grants', False) else []),
+                             *(['--allow-codex-pipeline'] if getattr(self, 'allow_codex_pipeline', False) else [])])
         tunnel = [str(self.client), 'run', '--profile-file', str(PROJECT/'systemd/aceis-mcp-tunnel.yaml'),
                   '--control-plane.base-url=https://api.openai.com',
                   '--control-plane.tunnel-id=tunnel_6ae1d745be7c8191b6d502b613317b4c',
@@ -190,6 +217,9 @@ class Services:
 
     def require_idle_database(self):
         """Read-only local evidence; never replay unresolved work to recover a service."""
+        from codex_host import pipeline_held
+        if pipeline_held(self.root):
+            raise Refused('Unresolved pipeline work requires reconciliation before service interruption')
         path = self.root/'tasks.sqlite'
         if not path.exists() and (self.root/STATE).exists():
             raise Refused('Recorded task database is missing; reconcile before service interruption')
@@ -199,7 +229,7 @@ class Services:
                               "('QUEUED','RUNNING','VERIFYING','UNKNOWN','WAITING_FOR_HUMAN')").fetchone()[0]:
                     raise Refused('Unresolved work requires reconciliation before service interruption')
 
-    def recovery_plan(self, rollback_mailbox=False, rollback_grants=False):
+    def recovery_plan(self, rollback_mailbox=False, rollback_grants=False, rollback_pipeline=False):
         """Return existing CLI argument arrays from recorded configuration, without applying them."""
         with self.locked():
             state = self.read_state()
@@ -216,6 +246,11 @@ class Services:
                     raise Refused('Recorded invocation is incomplete; do not guess capability flags')
             if type(state.get('mailbox_grants_enabled',False)) is not bool:
                 raise Refused('Recorded mailbox grant flag is invalid')
+            if state.get('codex_pipeline_enabled', False):
+                # Check the recorded binary, never the constructor default.
+                from codex_host import executor_snapshot
+                if executor_snapshot(self.root, references[1]) != state['codex_pipeline_snapshot']:
+                    raise Refused('Pipeline executor or policy hash differs from the recorded invocation')
             observed = {}
             for role, name in self.units.items():
                 props = self.show(name)
@@ -233,13 +268,15 @@ class Services:
             candidate = type(self)(self.root,references[1],references[0],
                                    state['local_llm_enabled'],state['local_models_enabled'],
                                    False if rollback_mailbox else state['chat_mailbox_enabled'],
-                                   False if rollback_mailbox or rollback_grants else state.get('mailbox_grants_enabled',False))
+                                   False if rollback_mailbox or rollback_grants else state.get('mailbox_grants_enabled',False),
+                                   allow_codex_pipeline=False if rollback_pipeline else state.get('codex_pipeline_enabled',False))
             checked = candidate.preflight(references[0])
             flags = [flag for enabled,flag in [
                 (candidate.allow_local_llm,'--allow-local-llm'),
                 (candidate.allow_local_models,'--allow-local-models'),
                 (candidate.allow_chat_mailbox,'--allow-chat-mailbox'),
-                (candidate.allow_mailbox_grants,'--allow-mailbox-grants')] if enabled]
+                (candidate.allow_mailbox_grants,'--allow-mailbox-grants'),
+                (candidate.allow_codex_pipeline,'--allow-codex-pipeline')] if enabled]
             base = ['/usr/bin/python3','-B',str(PROJECT/'scripts/poc_services.py')]
             common = ['--runtime',str(candidate.root),'--key-file',str(candidate.key),
                       '--codex',str(candidate.codex)]
@@ -248,7 +285,7 @@ class Services:
                 'stop':base+['stop',*common,'--apply'],
                 'start':base+['start',*common,*flags,'--apply'],
                 'status':base+['status',*common]}
-            return {'operation':'rollback-plan' if rollback_mailbox else ('grant-rollback-plan' if rollback_grants else 'resume-plan'),
+            return {'operation':'rollback-plan' if rollback_mailbox else ('grant-rollback-plan' if rollback_grants else ('pipeline-rollback-plan' if rollback_pipeline else 'resume-plan')),
                     'automatic_apply':False,'revalidate_before_apply':True,
                     'state_sha256':hashlib.sha256((self.root/STATE).read_bytes()).hexdigest(),
                     'observed_units':observed,'preflight':checked,'commands':commands,
@@ -275,6 +312,10 @@ class Services:
             if not binary.is_file() or not os.access(binary, os.X_OK): raise Refused('Executable is missing')
         if not (PROJECT/'systemd/aceis-mcp-tunnel.yaml').is_file(): raise Refused('Tunnel profile is missing')
         self.require_idle_database()
+        pipeline_hashes = None
+        if getattr(self, 'allow_codex_pipeline', False):
+            expected_snapshot = previous.get('codex_pipeline_snapshot') if previous.get('codex_pipeline_enabled', False) else None
+            pipeline_hashes = self.pipeline_snapshot(expected_snapshot)
         if self.allow_local_llm or self.allow_local_models:
             config_path = self.root/'local-llm.json'
             private_file(config_path,4096)
@@ -315,13 +356,19 @@ class Services:
         for attribute, flag in [('allow_local_llm','--allow-local-llm'),
                                 ('allow_local_models','--allow-local-models'),
                                 ('allow_chat_mailbox','--allow-chat-mailbox'),
-                                ('allow_mailbox_grants','--allow-mailbox-grants')]:
+                                ('allow_mailbox_grants','--allow-mailbox-grants'),
+                                ('allow_codex_pipeline','--allow-codex-pipeline')]:
             if adapter.count(flag) != int(getattr(self,attribute,False)):
                 raise Refused('Adapter capability argument was not inherited')
+        if commands['daemon'].count('--allow-codex-pipeline') != int(getattr(self, 'allow_codex_pipeline', False)):
+            raise Refused('Daemon pipeline capability argument was not inherited')
         if '--allow-writes' in adapter: raise Refused('Task writes are outside this service scope')
         return {'passed':True,'credential_file_reference':key['path'],'credential_mode':key['mode'],
                 'credential_contents_read':False,'tool_names':[t['name'] for t in tool_definitions(
-                    False,self.allow_local_llm,self.allow_local_models,self.allow_chat_mailbox)],
+                    False,self.allow_local_llm,self.allow_local_models,self.allow_chat_mailbox,
+                    getattr(self,'allow_codex_pipeline',False))],
+                'codex_pipeline_enabled':getattr(self,'allow_codex_pipeline',False),
+                'codex_pipeline_snapshot':pipeline_hashes,
                 'mailbox_policy_sha256':policy_hash,'mailbox_allowed_slots':slots,
                 'mailbox_grants_enabled':getattr(self,'allow_mailbox_grants',False),
                 'mailbox_grant_policy_sha256':grant_hash,'mailbox_grant_task_id':grant_task_id,
@@ -382,7 +429,7 @@ class Services:
 
     def start(self, daemon_timeout=20, tunnel_timeout=75):
         with self.locked():
-            self.preflight()
+            checked = self.preflight()
             previous = self.read_state()
             for role, name in self.units.items():
                 p = self.show(name)
@@ -406,7 +453,10 @@ class Services:
                      'units': self.units, 'invocations': {}, 'phase': 'STARTING', 'updated': time.time(),
                      'local_llm_enabled': self.allow_local_llm, 'local_models_enabled': self.allow_local_models,
                      'chat_mailbox_enabled': self.allow_chat_mailbox,
-                     'mailbox_grants_enabled': getattr(self,'allow_mailbox_grants',False)}
+                     'mailbox_grants_enabled': getattr(self,'allow_mailbox_grants',False),
+                     'codex_pipeline_enabled': getattr(self,'allow_codex_pipeline',False)}
+            if state['codex_pipeline_enabled']:
+                state['codex_pipeline_snapshot'] = checked['codex_pipeline_snapshot']
             state.update(credential_file_reference=str(self.key),codex_file_reference=str(self.codex))
             self.write_state(state)
             try:
@@ -456,7 +506,7 @@ class Services:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('operation', choices=['plan', 'resume-plan', 'rollback-plan', 'grant-rollback-plan', 'preflight', 'start', 'status', 'stop'])
+    parser.add_argument('operation', choices=['plan', 'resume-plan', 'rollback-plan', 'grant-rollback-plan', 'pipeline-rollback-plan', 'preflight', 'start', 'status', 'stop'])
     parser.add_argument('--runtime', type=Path, default=RUNTIME)
     parser.add_argument('--codex', type=Path, default=CODEX)
     parser.add_argument('--key-file', type=Path, default=KEY)
@@ -471,17 +521,22 @@ def main():
                         help='Separately approved fixed-slot question/answer mailbox; default off')
     parser.add_argument('--allow-mailbox-grants', action='store_true',
                         help='Separately approved bounded workstream grant; requires --allow-chat-mailbox; default off')
+    parser.add_argument('--allow-codex-pipeline', action='store_true',
+                        help='Separately approved bounded Codex pipeline; default off')
     args = parser.parse_args()
     if args.operation in ['start', 'stop'] and not args.apply:
         parser.error('start/stop require --apply after operator approval')
     os.umask(0o077)
     try:
         options = {'allow_mailbox_grants':True} if args.allow_mailbox_grants else {}
+        if args.allow_codex_pipeline: options['allow_codex_pipeline'] = True
         services = Services(args.runtime, args.codex, args.key_file, args.allow_local_llm, args.allow_local_models, args.allow_chat_mailbox, **options)
         if args.operation in ['resume-plan','rollback-plan']:
             result = services.recovery_plan(args.operation == 'rollback-plan')
         elif args.operation == 'grant-rollback-plan':
             result = services.recovery_plan(rollback_grants=True)
+        elif args.operation == 'pipeline-rollback-plan':
+            result = services.recovery_plan(rollback_pipeline=True)
         elif args.operation == 'preflight':
             result = services.preflight(args.expected_key_file)
         else:

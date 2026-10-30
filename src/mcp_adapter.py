@@ -308,7 +308,7 @@ class Adapter:
             if name in PIPELINE_TOOLS:
                 try:
                     data = self.pipeline.dispatch(name, arguments)
-                    failed = data.get('status') in ('UNKNOWN', 'FAILED', 'BLOCKED') or data.get('state') == 'UNKNOWN'
+                    failed = data.get('status') in ('UNKNOWN', 'FAILED', 'BLOCKED') or data.get('state') in ('UNKNOWN', 'BLOCKED')
                 except PipelineError as exc:
                     data, failed = exc.result(), True
                 self.record('end', outcome='error_or_uncertain' if failed else 'returned', **facts)
@@ -558,15 +558,15 @@ def main():
     pipeline = None
     try:
         if args.allow_codex_pipeline:
-            from codex_pipeline import build_pipeline
-            pipeline = build_pipeline(runtime_path(args.runtime), PROJECT)
+            from codex_host import DaemonPipelineProxy
+            pipeline = DaemonPipelineProxy(runtime_path(args.runtime))
         return serve(Adapter(args.runtime, args.allow_writes, args.allow_local_llm, args.allow_local_models,
                              args.allow_chat_mailbox, args.allow_mailbox_grants, args.allow_codex_pipeline, pipeline))
     except (OSError, ValueError, TypeError, sqlite3.Error):
         print('Adapter startup refused: verify private runtime and operator policy.', file=sys.stderr)
         return 1
     finally:
-        if pipeline is not None: pipeline.transport.close()
+        pass  # The daemon owns executor lifetime, independently of MCP reconnects.
 
 
 if __name__ == '__main__': raise SystemExit(main())

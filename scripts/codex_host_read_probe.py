@@ -17,7 +17,7 @@ import uuid
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / 'src'))
 from isolation_guard import environment
-from codex_app_protocol import ProtocolClient, ProtocolError, StdioTransport
+from codex_app_protocol import ProtocolClient, ProtocolError, StdioTransport, schema_version_supported
 
 
 def preflight(binary, expected_sha256):
@@ -74,7 +74,9 @@ def run(binary, expected_sha256, receipt_path, *, transport_factory=StdioTranspo
     signal.alarm(45)
     try:
         transport.start()
-        client.initialize()
+        initialized = client.initialize()
+        result['protocol_schema_supported'] = schema_version_supported(initialized['userAgent'])
+        if not result['protocol_schema_supported']: raise ProtocolError('UNVERIFIED_SERVER_VERSION')
         account = client.request('account/read', {'refreshToken': False})
         result['account_type'] = (account.get('account') or {}).get('type')
         page = client.request('model/list', {'includeHidden': False, 'limit': 100})
@@ -90,6 +92,7 @@ def run(binary, expected_sha256, receipt_path, *, transport_factory=StdioTranspo
         except Exception as error: result['close_exception_class'] = type(error).__name__
         result['client'] = client.diagnostics()
         result['transport'] = transport.diagnostics()
+        if not result['transport'].get('reaped', False): result['status'] = 'CLEANUP_UNCONFIRMED'
         receipt.seek(0); receipt.truncate(); json.dump(result, receipt, indent=2)
         receipt.write('\n'); receipt.flush(); os.fsync(receipt.fileno()); receipt.close()
     return result

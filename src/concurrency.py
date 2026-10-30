@@ -33,6 +33,8 @@ def guard(root, task, *, slot=True):
     root = Path(root)
     with ExitStack() as stack:
         stack.enter_context(lease(root / "runner.lock", shared=True))
+        from codex_host import pipeline_held
+        if pipeline_held(root): raise RuntimeError('Pipeline execution or cleanup remains unresolved')
         stack.enter_context(lease(root / "leases" / (identifier(task["id"]) + ".lock")))
         stack.enter_context(lease(root / "leases" / ("workspace-" + identifier(task["workspace_id"]) + ".lock")))
         if slot:

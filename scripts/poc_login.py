@@ -21,6 +21,7 @@ from chat_mailbox import Mailbox,MailboxError
 from mailbox_grants import load_runtime_grant
 
 FLAGS=['local_llm_enabled','local_models_enabled','chat_mailbox_enabled','mailbox_grants_enabled']
+PIPELINE_FLAG='codex_pipeline_enabled'
 
 class LoginBlocked(RuntimeError):
     def __init__(self,code):self.code=code;super().__init__(code)
@@ -39,6 +40,15 @@ def snapshot(manager):
     grant=load_runtime_grant(manager.root)
     data={'schema':1,'runtime':str(manager.root),**refs,**{k:state[k] for k in FLAGS},
           'fixed_mailbox_policy_sha256':static_hash,'grant_policy_sha256':grant.sha256()}
+    if type(state.get(PIPELINE_FLAG,False)) is not bool:
+        raise LoginBlocked('INVOCATION_SCOPE_CHANGED')
+    if state.get(PIPELINE_FLAG,False):
+        from codex_host import executor_snapshot
+        hashes=executor_snapshot(manager.root,Path(refs['codex_file_reference']))
+        if hashes!=state.get('codex_pipeline_snapshot'):
+            raise LoginBlocked('PIPELINE_EXECUTOR_PIN_MISMATCH')
+        data.update(codex_pipeline_enabled=True,codex_pipeline_snapshot=hashes)
+    # OFF deliberately contributes no new bytes to existing eleven-tool pins.
     pin=hashlib.sha256(json.dumps(data,sort_keys=True,separators=(',',':')).encode()).hexdigest()
     return state,data,pin
 
@@ -46,7 +56,8 @@ def snapshot(manager):
 def configured(runtime):
     manager=Services(runtime=runtime);state,_,_=snapshot(manager)
     return Services(manager.root,Path(state['codex_file_reference']),Path(state['credential_file_reference']),
-                    *[state[k] for k in FLAGS])
+                    *[state[k] for k in FLAGS],
+                    **({'allow_codex_pipeline':True} if state.get(PIPELINE_FLAG,False) else {}))
 
 
 def unit_name(manager):return manager.units['daemon'].removesuffix('-daemon.service')+'-login.service'
@@ -108,8 +119,11 @@ def restore(manager,expected_pin):
         if manager.health.exists() or manager.health.is_symlink():
             raise LoginBlocked('EXISTING_HEALTH_LOCATOR_REQUIRES_RECONCILIATION')
         checked=manager.preflight(Path(state['credential_file_reference']))
-        if not checked['passed'] or len(checked['tool_names'])!=11:
-            raise LoginBlocked('APPROVED_ELEVEN_TOOLS_NOT_CONFIRMED')
+        enabled=state.get(PIPELINE_FLAG,False)
+        if not checked['passed'] or len(checked['tool_names'])!=(23 if enabled else 11):
+            raise LoginBlocked('APPROVED_PIPELINE_TOOLS_NOT_CONFIRMED' if enabled else 'APPROVED_ELEVEN_TOOLS_NOT_CONFIRMED')
+        if enabled and checked.get('codex_pipeline_snapshot')!=state['codex_pipeline_snapshot']:
+            raise LoginBlocked('PIPELINE_EXECUTOR_PIN_MISMATCH')
         # Only reconcile a lost manager's state; no stop(), file deletion, or
         # policy/ledger mutation. start() rechecks idle work under the same lock.
         if state['phase']=='READY':

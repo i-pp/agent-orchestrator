@@ -12,6 +12,7 @@ Schema inspection and fake exchanges do not establish a live connection.
 import json
 import math
 import os
+import re
 import selectors
 import subprocess
 import time
@@ -19,6 +20,15 @@ from collections.abc import Callable
 
 
 SCHEMA_VERSION = "codex-cli 0.165.0"
+# Installed service binary was also inspected with generate-json-schema only.
+# Across 26 relevant schemas, differences are confined to CodexErrorInfo
+# variants, which this boundary does not interpret or export.
+COMPATIBLE_SCHEMA_VERSIONS = ('0.165.0', '0.164.0-alpha.11.1')
+
+
+def schema_version_supported(user_agent):
+    return isinstance(user_agent, str) and any(re.search(r'(?<![A-Za-z0-9])' + re.escape(v)
+        + r'(?![A-Za-z0-9.\-])', user_agent) for v in COMPATIBLE_SCHEMA_VERSIONS)
 # SHA-256 of generated artifacts inspected locally, not a runtime dependency.
 SCHEMA_SHA256 = {
     "ClientRequest.json": "9b89e2459362d20cec67a429ef9430fe6b0e9fb8bd87d445d4c9a6acccd87450",
@@ -433,9 +443,7 @@ class StdioTransport:
             raise ProtocolError("transport cannot be restarted")
         self._started = True
         try:
-            self._proc = subprocess.Popen(list(self.COMMAND), shell=False,
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, bufsize=0, close_fds=True)
+            self._proc = self._spawn()
             os.set_blocking(self._proc.stdout.fileno(), False)
             os.set_blocking(self._proc.stdin.fileno(), False)
             os.set_blocking(self._proc.stderr.fileno(), False)
@@ -451,6 +459,11 @@ class StdioTransport:
             self.close()
             raise ProtocolError("could not start fixed stdio executor") from exc
         return self
+
+    def _spawn(self):
+        return subprocess.Popen(list(self.COMMAND), shell=False,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, bufsize=0, close_fds=True)
 
     def _ready(self):
         if self._proc is None or self._closed or self._broken:

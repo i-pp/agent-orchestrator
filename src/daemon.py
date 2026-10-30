@@ -22,7 +22,8 @@ from transport import Process, redact
 
 
 class Daemon:
-    def __init__(self, root, binary=None, *, worker_factory=None, development=False):
+    def __init__(self, root, binary=None, *, worker_factory=None, development=False,
+                 allow_codex_pipeline=False, pipeline_factory=None):
         self.settings = scheduler.configuration()
         self.runner = Runner(root, binary, development=development)
         self.root, self.store = self.runner.root, self.runner.store
@@ -47,6 +48,9 @@ class Daemon:
         self.socket_inode = None
         self.exit_code = 0
         self.boot_id = str(uuid.uuid4())
+        self.allow_codex_pipeline = allow_codex_pipeline
+        self.pipeline_factory = pipeline_factory
+        self.pipeline = None
         self.events_stream = (self.root / "logs" / ("daemon-" + self.boot_id + ".jsonl")).open("x")
         self.events = BudgetLog(self.events_stream, self.settings["daemon"]["log_bytes"])
 
@@ -81,10 +85,26 @@ class Daemon:
                 "stopping": self.stopping, "active_tasks": list(self.children), "blocked": self.blocked,
                 "pending_recovery": self.pending_recovery, "maximum_sessions": 2,
                 "task_counts": {r[0]: r[1] for r in self.store.db.execute("SELECT state,count(*) FROM tasks GROUP BY state")},
-                "resource_policy": self.settings["daemon"], "worker_resource_policy": self.settings["worker"]}
+                "resource_policy": self.settings["daemon"], "worker_resource_policy": self.settings["worker"],
+                "codex_pipeline_enabled": self.allow_codex_pipeline,
+                "codex_pipeline_held": bool(self.pipeline and self.pipeline.held)}
+
+    def ordinary_busy(self):
+        return bool(self.stopping or self.children or self.blocked or self.pending_recovery
+            or self.store.db.execute("SELECT paused FROM scheduler_state WHERE id=1").fetchone()[0]
+            or self.store.db.execute("SELECT 1 FROM tasks WHERE state IN ('RUNNING','VERIFYING') LIMIT 1").fetchone())
 
     def handle(self, method, params):
         if not isinstance(params, dict): raise ValueError("params must be an object")
+        if method == 'codex_pipeline':
+            if not self.allow_codex_pipeline or self.pipeline is None: raise ValueError('Pipeline capability is not enabled')
+            from codex_pipeline import PipelineError, validate_arguments
+            if set(params) != {'tool', 'arguments'}: raise ValueError('Unexpected pipeline fields')
+            try:
+                validate_arguments(params['tool'], params['arguments'])
+                return self.pipeline.dispatch(params['tool'], params['arguments'])
+            except PipelineError as error:
+                return error.result()
         if method == "submit":
             if self.stopping: raise RuntimeError("Daemon is stopping; submission refused")
             allowed = {"prompt", "request_key", "acceptance", "workspace", "resume_of", "resume_approval", "timeout"}
@@ -221,6 +241,14 @@ class Daemon:
             except (ValueError, RuntimeError): self.blocked.append("unreconciled_unknown")
         try: storage_check(self.root, self.runner.resource_limits)
         except ResourceExceeded: self.blocked.append("storage_budget")
+        if self.pipeline is not None:
+            try: self.pipeline.pump()
+            except (OSError, ValueError, RuntimeError, sqlite3.Error): self.blocked.append('pipeline_operation_unknown')
+            if self.pipeline.held: return
+        else:
+            from codex_host import pipeline_held
+            if pipeline_held(self.root):
+                self.blocked.append('pipeline_recovery_pending'); return
         if self.stopping or self.blocked or self.status()["paused"]: return
         active = [dict(r) for r in self.store.db.execute("SELECT * FROM tasks WHERE state IN ('RUNNING','VERIFYING')")]
         if any(t["id"] not in self.children for t in active):
@@ -285,6 +313,9 @@ class Daemon:
 
     def stop(self):
         self.stopping = True
+        if self.pipeline is not None:
+            try: self.pipeline.close()
+            except (OSError, ValueError, RuntimeError, sqlite3.Error): self.exit_code = 1
         for task_id in self.children: self.store.cancel(task_id)
         # Let the runner send turn/interrupt and persist its result before
         # terminating its scope supervisor. Unacknowledged stops remain UNKNOWN.
@@ -304,6 +335,10 @@ class Daemon:
     def run(self):
         handlers = {sig: signal.signal(sig, lambda *_: setattr(self, "stopping", True)) for sig in [signal.SIGTERM, signal.SIGINT]}
         try:
+            if self.allow_codex_pipeline:
+                from codex_host import HostGateway
+                factory = self.pipeline_factory or HostGateway
+                self.pipeline = factory(self.root, self.runner.binary, Path(__file__).resolve().parents[1], self.ordinary_busy)
             self.pending_recovery = scheduler.recover_dispatches(self.runner)
             # Reconcile retained UNKNOWN evidence before accepting new dispatch.
             for row in self.store.db.execute("SELECT id FROM tasks WHERE state='UNKNOWN'").fetchall():
@@ -346,12 +381,13 @@ class Daemon:
         return self.exit_code
 
 
-def foreground(root, binary=None, serve_argv=None, *, development=False):
+def foreground(root, binary=None, serve_argv=None, *, development=False, allow_codex_pipeline=False):
     settings = scheduler.configuration()
     from isolation import prepare
     development_poc.configure(root, development)
     root, binary = prepare(root, binary)
-    argv = serve_argv or [sys.executable, "-B", str(Path(__file__)), "--serve", "--runtime", str(root), "--codex", binary, *(["--development-poc"] if development else [])]
+    argv = serve_argv or [sys.executable, "-B", str(Path(__file__)), "--serve", "--runtime", str(root), "--codex", binary,
+                         *(["--development-poc"] if development else []), *(['--allow-codex-pipeline'] if allow_codex_pipeline else [])]
     control = Control(root, settings["daemon"], scheduler_storage=True)
     child = Process(argv, cwd=root, env={"PATH": str(Path(binary).parent) + ":" + os.environ.get("PATH", "/usr/bin:/bin"),
                     "LANG": "C.UTF-8", "HOME": str(Path.home())}, raw_output=True, resources=control)
@@ -400,7 +436,8 @@ if __name__ == "__main__":
     parser.add_argument("--serve", action="store_true", required=True)
     parser.add_argument("--runtime", type=Path, required=True)
     parser.add_argument("--codex")
+    parser.add_argument('--allow-codex-pipeline', action='store_true')
     args = parser.parse_args()
     os.umask(0o077)
     verify_self_limits()
-    raise SystemExit(Daemon(args.runtime, args.codex, development=args.development_poc).run())
+    raise SystemExit(Daemon(args.runtime, args.codex, development=args.development_poc, allow_codex_pipeline=args.allow_codex_pipeline).run())

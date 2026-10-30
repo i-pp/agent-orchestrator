@@ -89,6 +89,16 @@ class HostProbeTests(unittest.TestCase):
         self.assertEqual([r['method'] for r in transport.calls], ['initialize'])
         self.assertTrue(transport.closed)
 
+    def test_successful_reads_with_unconfirmed_cleanup_are_not_success(self):
+        class Unreaped(FakeTransport):
+            def close(self): raise TimeoutError('private cleanup detail')
+        transport = Unreaped()
+        with patch.object(probe, 'preflight', return_value=(self.binary, {'state': 'HOST_CONTEXT'})):
+            result = probe.run(self.binary, self.sha, self.root / 'unreaped.json', transport_factory=lambda: transport)
+        self.assertEqual(result['status'], 'CLEANUP_UNCONFIRMED')
+        self.assertFalse(result['transport']['reaped'])
+        self.assertNotIn('private cleanup detail', json.dumps(result))
+
     def test_unclassified_io_error_does_not_claim_no_child_started(self):
         output = io.StringIO()
         args = ['probe', '--binary', '/fixture/codex', '--sha256', 'a' * 64, '--receipt', '/fixture/receipt']

@@ -4,9 +4,9 @@
 
 ## 確認した実APIと責務
 
-導入済み `codex-cli 0.165.0` の `app-server generate-json-schema` と `app-server --help` を確認した。対応schemaのhashは `src/codex_app_protocol.py` に固定。公式説明は [Codex app-server](https://learn.chatgpt.com/docs/app-server)。コードはstdio JSON-RPCの `initialize` → `initialized`、`account/read`、`model/list`、`thread/start`、`thread/resume`、`thread/read`、`turn/start`、`turn/steer`、`turn/interrupt`、`thread/archive` を使用する。CLIのschema生成・help確認と、実app-serverの起動成功は別の証拠である。
+npm 0.165.0と既存service参照のVS Code同梱0.164.0-alpha.11.1のschemaを生成・比較した。関連26schema中20はbyte一致、残りは未解釈CodexErrorInfo variant差分で、利用要求/応答必須fieldは一致。確認版以外はversion gateで拒否する。対応schemaのhashは `src/codex_app_protocol.py` に固定。公式説明は [Codex app-server](https://learn.chatgpt.com/docs/app-server)。コードはstdio JSON-RPCの `initialize` → `initialized`、`account/read`、`model/list`、`thread/start`、`thread/resume`、`thread/read`、`turn/start`、`turn/steer`、`turn/interrupt`、`thread/archive` を使用する。CLIのschema生成・help確認と、実app-serverの起動成功は別の証拠である。
 
-threadは会話と固定workspaceの単位、taskは1回のturnまたはまだ実行しない入力の単位。transportは明示起動する固定 `codex app-server --listen stdio://` の子プロセス。既存親主導adapterと同様に、実行IDの受渡し・UNKNOWNの照合を管理し、モデルやDAG実行基盤を再実装しない。既存native親adapterは標準Agentツール用、今回のprotocol adapterは公式app-server用で、両者を同じAPIとは扱わない。
+threadは会話と固定workspaceの単位、taskは1回のturnまたはまだ実行しない入力の単位。MCP CLIはexecutorをspawnせず既存UID socketへtyped転送する。既存daemonがhost context/state/既存native binary path/hashを確認して固定 `app-server --listen stdio://` を起動する。専用process groupとPID/start-tokenで回収し、通常runnerと同じleaseを共有する。既存親主導adapterと同様に、実行IDの受渡し・UNKNOWNの照合を管理し、モデルやDAG実行基盤を再実装しない。既存native親adapterは標準Agentツール用、今回のprotocol adapterは公式app-server用で、両者を同じAPIとは扱わない。
 
 modelはthread作成時に初期デフォルトを指定する。taskのmodel指定はそのtaskだけを上書きし、省略時はledgerに保存したthread初期デフォルトを使う。adapterは各turnでmodelを明示するため、app-server側で前turnの設定が継続していても、次の省略taskへ暗黙継承しない。store時は許可list、実行直前はaccount/model catalogも検証する。steerは既存turnへの入力で、model変更は受け付けず、ACKのturnId一致も確認する。
 
@@ -20,14 +20,14 @@ modelはthread作成時に初期デフォルトを指定する。taskのmodel指
 | `codex_thread_start` | 許可modelを検証し、固定workspaceに会話を作る。まだturnを開始しない |
 | `codex_task_submit` | 入力を永続FIFOへ登録。空きがあれば1turn開始、実行中ならqueue |
 | `codex_chat_store` | immutable入力を保存するだけ。推論しない |
-| `codex_chat_queue` | 保存入力をqueueへ移す。明示tickで実行 |
+| `codex_chat_queue` | 保存入力をqueueへ移す。daemon loopまたは明示tickで実行 |
 | `codex_chat_steer` | 現在turnの `expectedTurnId` に追加入力。model変更不可、暗黙steerなし |
 | `codex_threads_list` | このledgerが所有するthread/taskのみ。回答・生remote IDは一覧に含めない |
 | `codex_task_get` | 1taskと最大4KBの回答。既知thread/turnを読み戻して完了を照合 |
 | `codex_events` | durable cursor以降のイベントを最大50件。完了/承認待ちをpollで回収 |
 | `codex_task_cancel` | 未実行入力はlocal cancel。実行中はinterruptを1回要求し、実停止はterminal event/readbackで確認 |
 | `codex_thread_archive` | 未解決入力のない会話をarchive。履歴・ledgerを削除しない |
-| `codex_pipeline_tick` | 期限/状態照合と最大1件のFIFO dispatch。常駐wake/schedulerではない |
+| `codex_pipeline_tick` | 期限/状態照合と最大1件のFIFO dispatch。既存daemon loopも同処理を呼び、新サービスは作らない |
 
 新12操作を有効化すると既存11＋12＝23操作。入力schemaは追加fieldを拒否し、APIへ任意path・URL・shell・image・provider・configを渡す操作はない。承認待ちイベントには自動承認を付けない。承認解決UIへの接続は未実装で、待機・取消・人間への通知に留まる。
 
@@ -37,7 +37,7 @@ UUIDのlocal IDとapp-serverのopaque IDをledgerで対応付ける。request_ke
 
 SQLiteのprivate ledgerは、入力・状態・receipt・イベントをFULL同期transactionで保存。入力と回答各4KB、thread最大8、task最大32、同時turn最大2、論理期限最大300秒、operation最大512、event最大4096、JSON状態最大2MiB、DB最大8MiB。上限はlifetime上限で、自動削除・無期限拡張はしない。config例はさらに小さく、4thread・16task・同時1・120秒。policyまたは共通policy hashの変更を検出したら既存ledgerの流用を拒否する。
 
-期限は常駐OS watchdogではない。明示tick時に経過を検知し、interruptは1回だけ。停止確認が取れなければSTOP_REQUESTED/UNKNOWNを保持し、枠を解放して次の推論を始めない。接続切断後は同じledgerと既存Codex保存状態から既知IDだけを照合し、thread/resumeにも固定scopeを指定する。接続自体が壊れたら新しい明示接続が必要で、書込みの自動再送はしない。
+期限は常駐OS watchdogではない。daemon loopまたは明示tickで経過を検知し、interruptは1回だけ。停止確認が取れなければSTOP_REQUESTED/UNKNOWNを保持し、枠を解放して次の推論を始めない。接続切断後は同じledgerと既存Codex保存状態から既知IDだけを照合し、thread/resumeにも固定scopeを指定する。接続自体が壊れたら新しい明示接続が必要で、書込みの自動再送はしない。
 
 完了/承認通知はstdioをbounded pollし、受理済みイベントをcursorで再取得できる。起動ACKより早い完了は回答部分のみ保留し、返されたturn IDが一致した場合に採用する。archive中/UNKNOWNはthreadをclosingとして保持し、別入力の実行を拒否する。要求受理と実停止/実archiveの確定を混同しない。
 
@@ -52,7 +52,7 @@ python3 -B "$PROJECT_ROOT/src/mcp_adapter.py" \
   --runtime "$STATE_DIR" --allow-codex-pipeline
 ```
 
-これはローカルstdio候補を起動する入口。既存11操作の各flagは別途維持が必要。専用service CLI・login自動復帰への新flag継承、既存tunnel経由での23操作公開はまだ組み込んでいないため、このコマンドだけで現用サービスが拡張されたとは扱わない。イントラ移設はtransport/executorを分けたまま、秘密・local policy・runtimeをGit対象外に置く。今回HTTP公開、新キー、allowlist拡大はしない。
+これはローカルstdio候補を起動する入口。既存11操作の各flagは別途維持が必要。featureではdaemon/adapter双方へのflag伝播、4hash pinと11/23操作のlogin照合、pipeline-only rollbackを実装済み。現用適用はしていない。このCLIにはmatching daemonのopt-inも必要で、単独ではexecutorを起動しない。イントラ移設はtransport/executorを分けたまま、秘密・local policy・runtimeをGit対象外に置く。今回HTTP公開、新キー、allowlist拡大はしない。
 
 明示起動時はaccount/readを `refreshToken=false` とし、返値はaccount typeだけへ射影。ChatGPT認証と、thread実効provider=`openai`を確認してからtaskを実行する。新規login/key/provider設定はしない。料金額・プラン内の実精算はこのAPIでは検証できない。
 
@@ -68,7 +68,7 @@ rollbackは新flagを外して旧11操作の起動引数へ戻す。実行中tas
 
 同日の許可済みmetadata読み取りprobeでは、通常の管理exec内で固定stdio app-server子プロセスを1回起動したが、initializeのACKを確認できずUNKNOWNで終了。account/readとmodel/listは送っておらず、認証種別・実モデル一覧・利用権・課金区分は未確認。子プロセスは回収済み、推論要求0、再試行0。当時のtransportはstderrを破棄しstdout原本/例外原因も保存しなかったため、根本原因は遡って特定できない。help/versionで見えたread-only PATH alias警告だけから認証/権限障害と断定しない。host native環境との同等性も未確認。保護領域・別credential・別実行権限へ切り替えていない。読取りprobeとturnを伴う追加sandbox作成を区別し、後者は実施しない。
 
-接続診断改修では、本文を保存せず、失敗段階・バイト数・固定stderr分類・子終了コード/回収を記録する。initialize ACK検証とinitialized通知送信を分け、EOF・JSON framing・response相関・result schema不一致・期限を区別する。stderrは64KiBで制限し、読取り中だけでなく大きなstdin書込み中も排出する。NDJSON/CRLF、分割UTF-8、partial write、stderr先行出力、schema不一致、LSP framing拒否をfake pipeで検証した。これらのfixture成功で旧probeの原因を確定したとは扱わず、実接続の限定再試行は別判断のまま保留する。
+接続診断改修では、本文を保存せず、失敗段階・バイト数・固定stderr分類・子終了コード/回収を記録する。initialize ACK検証とinitialized通知送信を分け、EOF・JSON framing・response相関・result schema不一致・期限を区別する。stderrは64KiBで制限し、読取り中だけでなく大きなstdin書込み中も排出する。NDJSON/CRLF、分割UTF-8、partial write、stderr先行出力、schema不一致、LSP framing拒否をfake pipeで検証した。これらのfixture成功で旧probeの原因を確定したとは扱わない。その後、承認済み診断を同じ管理execで1回実施し、initialize時のstdout 0・EOF・自然終了1・stderrのread-only分類を確認した。account/model要求0、子回収済み。通常hostの固定probeは引き続き未実行。
 
 | 成功条件 | 今回の範囲 |
 |---|---|
@@ -76,8 +76,11 @@ rollbackは新flagを外して旧11操作の起動引数へ戻す。実行中tas
 | Codex→Chat起動 | 未接続。mailboxもapp-serverも休止Chatをwakeしない |
 | mailboxへの回答保存 | 既存明示APIを使うオフライン連携PASS。実Chatによる保存は別確認 |
 | モデルのファイル編集・実行 | 初段read-onlyでは対象外。write scopeと実行環境の追加承認が必要 |
-| 常駐通知・自律継続 | 未実装。events/tickの明示pollが必要 |
+| queueの継続 | 既存daemon loopへ実装・offline検証済み。実機未確認 |
+| 通知・Chat wake | eventsのpoll回収のみ。Chatへのpush/wakeは未接続 |
 
 逆方向の既存UI経路は、導入済みCodex app toolの `send_message_to_thread` が既存ChatGPT会話を対象にできる契約を確認した。ChatGPT宛にはmodel/thinking overrideは適用されない。送信には宛先会話へのユーザー明示承認が必要で、今回メッセージは送っていない。`read_thread`は現在の実機確認で、既存Chatの過去回答495文字を省略なしに取得できた。以前の本文参照だけという制約と区別し、この1件での本文回収成功を記録する。他会話や実行中turnの回収まで保証しない。UI toolはこのlocal stdio executorやイントラMCPから呼べるHTTP APIではなく、自動wake bridgeは未実装。実際に許可されたUI側Codexが既存Chatへ投稿し、Chatが既存mailbox APIで回答を保存する経路を再利用する案はあるが、今回の12toolだけでその両端が自動接続されたことにはならない。
 
 秘密・顧客情報を依頼へ入れない。prompt/answerはprivate ledgerと該当get結果に含まれるが、audit/eventsへ本文・コマンド・credential・workspace実pathを記録しない。ID/hashはChatのidentity証明ではない。
+
+Host配備時は、既存binary参照を変えず`codex-pipeline-executor.json`へ承認hashを置く。例は`config/codex-pipeline-executor.example.json`。host modeは同時1turn固定。通常job/paused/UNKNOWN/cleanup未確認時は新turnを開始しない。model不達/認証種別不一致のqueue項目はBLOCKED・未実行として止め、背景pollで同じ要求を再生成しない。詳細は[host配備手順](codex-host-deployment.md)。

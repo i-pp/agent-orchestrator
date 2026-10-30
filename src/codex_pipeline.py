@@ -144,7 +144,7 @@ def validate_arguments(name, args):
 
 
 class Pipeline:
-    def __init__(self, runtime, policy, client, *, instructions, policy_sha256, clock=time.time):
+    def __init__(self, runtime, policy, client, *, instructions, policy_sha256, clock=time.time, admission=None):
         self.root = Path(runtime).absolute()
         if any(p.is_symlink() for p in [self.root, *self.root.parents]): raise PipelineError('UNSAFE_RUNTIME')
         info = self.root.stat()
@@ -156,6 +156,7 @@ class Pipeline:
         self.instructions, self.common_hash = instructions, policy_sha256
         self.policy_hash = digest({'policy': self.policy, 'common': policy_sha256})
         self.client, self.clock = client, clock
+        self.admission = admission
         self.loaded = set()
         self.db = self.root / 'codex-pipeline.sqlite3'
         if not self.db.exists():
@@ -358,8 +359,19 @@ class Pipeline:
                          and not s['threads'][t['thread_id']]['archived']), None)
         ident = self._mutate(candidate)
         if not ident: return {'status': 'IDLE_OR_HELD'}
+        if self.admission is not None and not self.admission(): return {'status': 'SHARED_BUDGET_HELD'}
         task = self._mutate(lambda s: dict(self._task(s, ident)))
-        self._model(task['model'])
+        try:
+            self._model(task['model'])
+        except PipelineError as error:
+            if error.code not in ('MODEL_NOT_AVAILABLE_OR_ALLOWED', 'SUBSCRIPTION_AUTH_REQUIRED'): raise
+            def blocked(s):
+                current = self._task(s, ident)
+                if current['state'] == 'QUEUED':
+                    current.update(state='BLOCKED', reason_code=error.code, execution_started=False)
+                    self._event(s, 'task_blocked', current['thread_id'], ident, reason_code=error.code)
+                return self._view(current)
+            return self._mutate(blocked)
         # app-server restart does not imply a loaded thread. Resume only the
         # exact owned thread, with the same fixed policy; never import by path.
         if task['thread_id'] not in self.loaded:
@@ -458,7 +470,7 @@ class Pipeline:
             task = self._task(s, task_id)
             thread = self._thread(s, task['thread_id'])
             if task['state'] in TERMINAL: return {'task_id': task_id, 'local': True}
-            if task['state'] in ('STORED', 'QUEUED'):
+            if task['state'] in ('STORED', 'QUEUED', 'BLOCKED'):
                 task['state'] = 'CANCELLED'
                 self._event(s, 'task_cancelled', task['thread_id'], task_id)
                 return {'task_id': task_id, 'local': True}
@@ -516,7 +528,7 @@ class Pipeline:
                     task['pending_approval_turn'] = params['turnId']
         self._mutate(accept)
 
-    def tick(self):
+    def tick(self, *, dispatch=True):
         transport = getattr(self, 'transport', None)
         if transport is not None: transport.poll(timeout_s=0)
         tasks = self._mutate(lambda s: [t['id'] for t in s['tasks'].values() if t['state'] in HELD])
@@ -526,7 +538,7 @@ class Pipeline:
             if task['state'] in HELD and task['deadline'] <= self.clock() and not task['stop_sent']:
                 try: self.cancel(ident, 'deadline:' + ident)
                 except PipelineError: pass  # UNKNOWN still holds its slot; never redispatch.
-        return self._dispatch()
+        return self._dispatch() if dispatch else {'status': 'RECONCILED'}
 
     def dispatch(self, name, arguments):
         validate_arguments(name, arguments)
