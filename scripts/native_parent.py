@@ -19,6 +19,12 @@ FIELDS = {
     'inventory': {'action_ids', 'result'},
     'interrupted': {'action_id', 'accepted'},
     'verified': {'action_id', 'accepted', 'reason', 'verification'},
+    'context': {'action_id', 'sha256'},
+    'thread_observation': {'request_ref', 'capture'},
+    'bind_from_thread': {'request_ref', 'capture'},
+    'readonly_prepare': set(),
+    'handoff_request': {'request_ref'},
+    'readonly_verified': {'action_id', 'capture_ref', 'spawn_request_ref'},
 }
 MAX_INPUT = 65536
 

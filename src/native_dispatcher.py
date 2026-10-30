@@ -78,7 +78,9 @@ class NativeDispatcher:
         def retire(j,data,now):
             a=j['actions'].pop(action_id)
             j['retired'].append({'action_id':action_id,'digest':a.get('observation_digest'),
-                'kind':a['kind'],'task_id':a['task_id'],'dispatch_id':a['dispatch_id']})
+                'kind':a['kind'],'task_id':a['task_id'],'dispatch_id':a['dispatch_id'],
+                'created_at':a['created'],'issued_at':a.get('issued_at'),
+                'observed_at':a.get('observed_at'),'applied_at':now})
             j['retired']=j['retired'][-32:]
             if a['kind']=='POLL':j['next_poll'][a['dispatch_id']]=now+1
             self._event(j,'ACK',action_id=action_id,task_id=a['task_id'],time=now)
@@ -162,6 +164,7 @@ class NativeDispatcher:
             if a.get('observation_digest') not in [None,sha(event)]:raise DispatchError('OBSERVATION_CONFLICT')
             def freeze(j,data,now):
                 row=j['actions'][action_id];row.update(status='OBSERVED',observation=deepcopy(event),observation_digest=sha(event))
+                row.setdefault('observed_at',now)
             self._edit(freeze)
             applied=self._apply_or_block(self._journal(self.team.snapshot())['actions'][action_id])
             return {'duplicate':False,'applied':applied}

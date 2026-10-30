@@ -1,5 +1,47 @@
 # 親が継続する標準ツールadapter
 
+## v3の修正候補（未反映・実モデル再試験なし）
+
+単発smokeで、長文の転記差分と親の観測登録遅延が発生した。v3は本文を専用run内のimmutableファイルへ固定し、標準spawnには`context` CLIで読む短い指示とSHA-256だけを渡す。ファイル・bootstrap・呼出し引数の不一致は機械portの呼出し前に拒否する。`fork_turns=none`は維持する。v1/v2の保存runは黙って移行せず、失敗結果を書き換えない。
+
+`context`入力は`action_id, sha256`。返された`result.message`を、status OK・hash一致・有効期限内の場合だけ使う。参照は固定run内に限定し、任意path/URLを公開しない。追加のMCP権限やmodel APIはない。
+
+`native_thread_capture.cjs`は既存`codex_app.read_thread`のroot活動からcanonical pathとchild threadを対応づけ、子の応答文字列・provider開始/完了・poll開始/完了を機械的に取得する。`saveCapture`または`runLocalAdapter`を同じawait内で呼び、親の思考ターンを間に挟まず保存・登録する。モデル本文の時刻記述は使わない。`bind_from_thread`と`thread_observation`はこの構造化captureを受け、手でIDや回答本文を転記せず処理する。
+
+`NativeToolDriver`は実行元が明示的に与えるtool portへcanonical引数を渡す補助で、標準collaborationをPythonから直接呼ぶ新APIではない。portなしのtick/executeはadmit前に停止する。実際のCode Modeではread_threadとローカルCLI呼出しを接続する必要がある。native spawn自体は標準toolで親が行う。既存のモデル起動を使うread-only backchannelは過去threadで確認済みだが、新しいv3 runへの実登録・子1体のE2Eは未実施。
+
+### 固定のread-only caller（無モデル統合検証済み）
+
+`scripts/native_thread_capture.cjs`の`makeCliPort(execCommand, projectRoot, runDir)`は、実行元が許可済みのproject/run絶対pathへ固定するローカルCLI接続。入力JSONをPOSIX引用してstdinへ渡し、有限のoperationだけを許す。非0終了・session継続・ACK不一致は照合待ちとし、再送しない。MCPへの新しい公開操作ではない。
+
+1. 新規runを既存CLIでinitする。taskは1件、Researcher/cloud、依存なし、allowed空、cloud同時数1、max_dispatches=1、max_retries=0、task/run期限各120秒以下。step_limitは100。instructionは「JSONだけを返す。context_sha256はloaderの返却値、policy_version/policy_sha256は読込policy、roleはResearcher」とする。
+2. Code Modeで`prepareReadonly({runLocalAdapter})`を1回呼ぶ。実装は`readonly_prepare`で上記scopeをadmit前に検査する。返された`arguments`は短い固定bootstrapそのもの。request_refを同じ実行元の状態に保管する。既存run/未解決要求を見つけたら再spawnせず照合する。
+3. **親の標準`collaboration.spawn_agent`を1回だけ呼ぶ。** このtoolはCode Modeから利用できないため、ここだけは親のtool境界である。自動・原子的なspawnや、この境界で親が値を変更しないことは保証できない。長文policy/roleを転記せず、子のcontext loaderが固定本文hashを確認する。
+4. `finishReadonly`へ保存したrequest_refと現在の親thread UUIDを渡す。canonical agent pathとdeadlineはCLIから復元する。root→childのread_thread照合、bind、poll結果登録、固定JSON比較、既存NativeTeamによるGit入力revision/空allowlist検査、receipt生成までを同じawait内で継続する。子の文章をshellや検証命令として実行しない。
+5. callerは最大30サイクル、poll間隔1秒、常駐wakeなし。`PENDING`なら同じrequest_refで再入できる。bind/poll登録後のACK喪失も保存済み対応情報・captureから復元し、再spawnしない。未知状態/中断要求/CLI結果不明なら照合待ちで止め、成功を推測しない。
+
+Code Modeへの接続形は次のとおり。`m`はこの固定スクリプトを読み込んだmodule exports、pathは承認済みの絶対path、`parentThreadId`は実行中の親thread UUIDとする。文字列の子回答や長文policyを親が再入力する箇所はない。
+
+```javascript
+const runLocalAdapter = m.makeCliPort(args => tools.exec_command(args), projectRoot, runDir);
+// 第一呼出し：descriptorだけを返す。モデル起動はしない。
+const ready = await m.prepareReadonly({runLocalAdapter});
+store('readonly-request-ref', ready.request_ref);
+text(ready);
+// 親が標準spawnを一度実行した後の別Code Mode呼出し：
+const result = await m.finishReadonly({runLocalAdapter,
+  readThread: args => tools.mcp__codex_app__read_thread(args),
+  pause: ms => new Promise(resolve => setTimeout(resolve, ms))},
+  {parentThreadId, spawnRequestRef: load('readonly-request-ref')});
+text(result);
+```
+
+`readonly_verified`は一般の成果検証器ではない。固定scopeのpolicy/role/context JSONとGit状態だけを検査し、モデル自身の正解宣言を採用しない。無モデル統合fixtureは実際のJS→shell引用→Python CLI→永続state/receiptを通し、read_thread/子の返答のみfixtureで供給する。正常、回答不一致、作業領域の変更、bindとpollそれぞれのACK喪失、再入後receipt一致を確認する。実native smokeおよび実interrupt/errorの返り値schemaは未検証のまま区別する。
+
+期限は引き続きadmitから親検証までのend-to-end。provider完了が期限前でも、登録/検証が遅ければ成功へ変更しない。遅れをprovider応答・poll返却・登録に分けて残す。終了確認までleaseを保持し、確認後は品質不採用のまま解放する。常駐wakeやOS強制killは提供しない。
+
+以下のv2説明は移行前の契約・経緯として残す。v3では長文messageの直接転記と回答本文の手入力を通常経路に使わない。raw interrupt返り値の機械schemaは実証されていないため、自動受付/終了認定はしない。
+
 検証範囲：adapter実装とオフラインfixture。新しい実Agent起動、daemon/MCP反映は未実施。コードの配置・Git保存と、実ツールでの動作検証は区別する。
 
 ## 公式機能と今回の接続境界

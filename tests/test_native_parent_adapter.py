@@ -70,7 +70,11 @@ class ParentAdapterTests(unittest.TestCase):
             self.assertEqual(set(call['arguments']), TOOLS[call['tool']])
             self.assertEqual(call['arguments']['fork_turns'], 'none')
             self.assertEqual(self.state()['dispatcher']['parent_adapter']['fork_turns'], 'none')
-            message = call['arguments']['message']
+            self.assertNotIn(self.bundle.text, call['arguments']['message'])
+            reference = call['context_ref']
+            context = self.adapter.context(reference['key'], reference['sha256'])
+            self.assertEqual(context['context_sha256'], reference['sha256'])
+            message = context['message']
             self.assertIn(self.bundle.text, message)
             self.assertIn('Never spawn children', message)
             self.assertIn(self.spec['requirements'][0], message)

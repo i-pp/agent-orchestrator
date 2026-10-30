@@ -8,12 +8,16 @@ import json
 from pathlib import Path
 import re
 import tomllib
+import shlex
+import math
 
 from common_policy import load_project_policy
 from native_team import sha
+from chat_mailbox import _json
 from native_team_artifacts import _no_symlinks
+from native_handoff import HandoffStore
 
-PROFILE = 'collaboration-parent-v2'
+PROFILE = 'collaboration-parent-v3'
 TOOLS = {
     'collaboration.spawn_agent': {'task_name', 'message', 'fork_turns'},
     'collaboration.list_agents': {'path_prefix'},
@@ -32,12 +36,13 @@ class NativeParentAdapter:
         self.dispatcher = dispatcher
         self.team = dispatcher.team
         self._config(self.team.snapshot())
+        self.handoffs = HandoffStore(self.team.root)
 
     @staticmethod
     def _config(state):
         config = state['dispatcher'].get('parent_adapter')
         if (not isinstance(config, dict) or config.get('profile') != PROFILE or config.get('schema') != 1
-                or config.get('fork_turns') != 'none'):
+                or config.get('fork_turns') != 'none' or config.get('task_transport') != 'sha256-file'):
             raise AdapterError('PARENT_ADAPTER_NOT_CONFIGURED')
         return config
 
@@ -81,7 +86,7 @@ class NativeParentAdapter:
         state = dispatcher.snapshot()
         _, roles = cls._context(state)
         fixed = {'schema': 1, 'profile': PROFILE, 'parent_task': parent_task,
-                 'step_limit': step_limit, 'fork_turns': 'none',
+                 'step_limit': step_limit, 'fork_turns': 'none', 'task_transport': 'sha256-file',
                  'role_hashes': {k: v['sha256'] for k, v in roles.items()}}
         with dispatcher.team._change() as (data, plan, now):
             journal = dispatcher._journal(data)
@@ -166,13 +171,27 @@ class NativeParentAdapter:
                     + roles[task['role']]['instructions'] + '\nTASK\n'
                     + json.dumps(prompt, ensure_ascii=False, sort_keys=True)
                 )
+                budgets = state['spec']['registry']['budgets']
+                deadline = min(state['plan']['tasks'][action['task_id']]['started'] + budgets['task_timeout_s'],
+                               state['plan']['run_started'] + budgets['run_timeout_s'])
+                reference = self.handoffs.put('task', action['action_id'], {
+                    'schema': 1, 'action_id': action['action_id'], 'dispatch_id': action['dispatch_id'],
+                    'policy': action['policy'], 'message': message, 'not_after': deadline})
+                cli = Path(__file__).resolve().parents[1] / 'scripts/native_parent.py'
+                command = shlex.join(['python3', '-B', str(cli), 'context', '--run', str(self.team.root)])
+                body = json.dumps({'action_id': action['action_id'], 'sha256': reference['sha256']}, sort_keys=True)
+                bootstrap = ('Read the canonical task before doing work. Run this fixed local command with the JSON on stdin:\n'
+                             + command + '\n' + body + '\n'
+                             'Follow result.message only if status is OK and its context_sha256 matches the requested hash. '
+                             'On any failure, stop and report BLOCKED. Do not edit files, create children, namespaces, '
+                             'services, credentials or external messages while loading the task. Higher-priority rules apply.')
                 call = self._call('collaboration.spawn_agent', {
                     'task_name': self._name(state, action).rsplit('/', 1)[1],
-                    'message': message, 'fork_turns': 'none'}, [action['action_id']])
+                    'message': bootstrap, 'fork_turns': 'none'}, [action['action_id']])
                 call['expected_agent_name'] = self._name(state, action)
-                budgets = state['spec']['registry']['budgets']
-                call['not_after'] = min(state['plan']['tasks'][action['task_id']]['started'] + budgets['task_timeout_s'],
-                                        state['plan']['run_started'] + budgets['run_timeout_s'])
+                call['not_after'] = deadline
+                call['context_ref'] = reference
+                call['arguments_sha256'] = sha(call['arguments'])
                 calls.append(call)
             elif kind == 'POLL':
                 self._bound_agent(state, action)
@@ -194,6 +213,13 @@ class NativeParentAdapter:
         if poll_ids:
             calls.append(self._call('collaboration.list_agents',
                                     {'path_prefix': config['parent_task']}, poll_ids))
+        for call in calls:
+            call['arguments_sha256'] = sha(call['arguments'])
+            budgets = state['spec']['registry']['budgets']
+            call['deadlines'] = {i: min(state['plan']['tasks'][state['dispatcher']['actions'][i]['task_id']]['started'] + budgets['task_timeout_s'],
+                                       state['plan']['run_started'] + budgets['run_timeout_s'])
+                                 for i in call['action_ids']}
+            call['request_ref'] = self.handoffs.put('request', sha(call['action_ids']), call)
         issued = {a['action_id'] for a in actions}
         progress['states'] = {k: t['state'] for k, t in state['plan']['tasks'].items()}
         if not actions and any(a['status'] == 'BLOCKED' for a in state['dispatcher']['actions'].values()):
@@ -212,6 +238,204 @@ class NativeParentAdapter:
                 'pending_reconciliation': pending, 'optional_wait': wait,
                 'steps_used': self._config(state)['steps'], 'automatic_tool_execution': False,
                 'wake_after_parent_turn': False}
+
+    def context(self, action_id, sha256):
+        state, action = self._action(action_id, 'SPAWN')
+        if (state['plan']['tasks'][action['task_id']]['state'] != 'RUNNING'
+                or state['bindings'][action['task_id']]['released']):
+            raise AdapterError('CONTEXT_NOT_ACTIVE')
+        value = self.handoffs.read({'kind': 'task', 'key': action_id, 'sha256': sha256})
+        if (value['action_id'] != action_id or value['dispatch_id'] != action['dispatch_id']
+                or value['policy'] != state['spec']['policy']):
+            raise AdapterError('CONTEXT_CORRELATION_MISMATCH')
+        if self.team.clock() >= value['not_after']:
+            raise AdapterError('CONTEXT_DEADLINE_REACHED')
+        return {'context_sha256': sha256, 'message': value['message']}
+
+    def _readonly_scope(self):
+        state = self.team.snapshot()
+        tasks = state['spec']['tasks']
+        budgets = state['spec']['registry']['budgets']
+        if (len(tasks) != 1 or tasks[0]['role'] != 'Researcher' or tasks[0]['allowed']
+                or tasks[0]['deps'] or tasks[0]['backend'] != 'cloud'
+                or budgets['max_dispatches'] != 1 or budgets['max_retries'] != 0
+                or budgets['cloud_concurrency'] != 1
+                or budgets['task_timeout_s'] > 120 or budgets['run_timeout_s'] > 120):
+            raise AdapterError('READONLY_SMOKE_SCOPE_REQUIRED')
+        return state
+
+    def readonly_prepare(self):
+        # Reject general development tasks before admission; this fixed caller
+        # verifies only the bounded synthetic Researcher contract below.
+        self._readonly_scope()
+        return self.step()
+
+    def handoff_request(self, request_ref):
+        self._readonly_scope()
+        call = self.handoffs.read(request_ref)
+        if call['tool'] != 'collaboration.spawn_agent' or len(call['action_ids']) != 1:
+            raise AdapterError('SPAWN_REQUEST_REQUIRED')
+        state, action = self._action(call['action_ids'][0], 'SPAWN')
+        if call['expected_agent_name'] != self._name(state, action):
+            raise AdapterError('SPAWN_RESULT_SCOPE_MISMATCH')
+        return {**call, 'request_ref': request_ref,
+                'binding_confirmed': state['bindings'][action['task_id']]['agent_id'] == call['expected_agent_name'],
+                'receipt': state['receipts'].get(action['task_id'])}
+
+    def readonly_verified(self, action_id, capture_ref, spawn_request_ref):
+        self._readonly_scope()
+        state, action = self._action(action_id, 'VERIFY')
+        spawn = self.handoff_request(spawn_request_ref)
+        _, spawn_action = self._action(spawn['action_ids'][0], 'SPAWN')
+        if capture_ref is None:
+            # Recover a previously captured terminal reply after a bounded
+            # caller return. No new poll/spawn or answer transcription.
+            candidates = []
+            for saved in self._config(state).get('captures', {}).values():
+                value = self.handoffs.read(saved['capture_ref'])
+                if value.get('provider_evidence', {}).get('state') != 'COMPLETED':
+                    continue
+                request = self.handoffs.read(value['request'])
+                if request['tool'] != 'collaboration.list_agents':
+                    continue
+                ids = value.get('effective_action_ids', request['action_ids'])
+                if len(ids) == 1 and self._action(ids[0])[1]['dispatch_id'] == action['dispatch_id']:
+                    candidates.append(saved['capture_ref'])
+            if len(candidates) != 1:
+                raise AdapterError('READONLY_CAPTURE_CORRELATION_REQUIRED')
+            capture_ref = candidates[0]
+        capture = self.handoffs.read(capture_ref)
+        poll = self.handoffs.read(capture['request'])
+        poll_ids = capture.get('effective_action_ids', poll['action_ids'])
+        if len(poll_ids) != 1:
+            raise AdapterError('READONLY_CAPTURE_CORRELATION_REQUIRED')
+        _, poll_action = self._action(poll_ids[0], 'POLL')
+        if (spawn_action['dispatch_id'] != action['dispatch_id']
+                or poll_action['dispatch_id'] != action['dispatch_id']
+                or poll['tool'] != 'collaboration.list_agents'
+                or capture.get('measurement_tool') != 'codex_app.read_thread'
+                or capture_ref['key'] not in self._config(state).get('captures', {})):
+            raise AdapterError('READONLY_CAPTURE_CORRELATION_REQUIRED')
+        context = self.handoffs.read(spawn['context_ref'])
+        evidence = capture['provider_evidence']
+        expected = {'context_sha256': spawn['context_ref']['sha256'],
+                    'policy_version': context['policy']['version'],
+                    'policy_sha256': context['policy']['sha256'], 'role': 'Researcher'}
+        try:
+            answer = _json(evidence['answer'].encode())
+        except (ValueError, TypeError, AttributeError, KeyError):
+            answer = None
+        accepted = (evidence.get('state') == 'COMPLETED' and answer == expected
+                    and self.team.clock() < context['not_after'])
+        _, roles = self._context(state)
+        if {k: v['sha256'] for k, v in roles.items()} != self._config(state)['role_hashes']:
+            raise AdapterError('ROLE_PIN_MISMATCH')
+        if self.team.clock() >= context['not_after']:
+            self.team.expire()
+        registration = self.verified(action_id, accepted, 'Fixed read-only context/policy/role check',
+            {'commands': ['read-only canonical context/policy/role JSON comparison',
+                          'NativeTeam input revision and empty artifact allowlist check'],
+             'exit_codes': [0 if accepted else 1, 0]})
+        return {'accepted': accepted, 'registration': registration,
+                'capture_ref': capture_ref, 'state': self.team.snapshot()['plan']['tasks'][action['task_id']]['state']}
+
+    def thread_observation(self, request_ref, capture):
+        """Ingest the mechanical read-only app capture; never parse model times."""
+        from native_tool_driver import NativeToolDriver
+        if (not isinstance(capture, dict) or capture.get('schema') != 1
+                or capture.get('source') != 'codex_app.read_thread'):
+            raise AdapterError('INVALID_THREAD_CAPTURE')
+        call = self.handoffs.read(request_ref)
+        if call['tool'] != 'collaboration.list_agents':
+            raise AdapterError('POLL_REQUEST_REQUIRED')
+        matches = []
+        for action_id in call['action_ids']:
+            state, action = self._action(action_id, 'POLL')
+            if self._bound_agent(state, action) == capture.get('agent_path'):
+                matches.append((action_id, state, action))
+        if len(matches) != 1:
+            raise AdapterError('CAPTURE_AGENT_MISMATCH')
+        action_id, state, action = matches[0]
+        child_id = capture.get('child_thread_id')
+        if not isinstance(child_id, str) or not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', child_id):
+            raise AdapterError('CAPTURE_THREAD_ID_REQUIRED')
+        if capture.get('deadline_at') != call['deadlines'][action_id]:
+            raise AdapterError('CAPTURE_DEADLINE_MISMATCH')
+        old_thread = self._config(state).get('native_threads', {}).get(action['dispatch_id'])
+        if old_thread not in [None, child_id]:
+            raise AdapterError('CAPTURE_THREAD_ID_CONFLICT')
+        for field in ['poll_started_at', 'poll_finished_at', 'provider_started_at']:
+            value = capture.get(field)
+            if type(value) not in [int, float] or not math.isfinite(value) or value < 0:
+                raise AdapterError('INVALID_CAPTURE_TIME')
+        if not capture['poll_started_at'] <= capture['poll_finished_at'] <= self.team.clock():
+            raise AdapterError('INVALID_CAPTURE_TIME')
+        completed = capture.get('state') == 'COMPLETED'
+        if capture.get('state') not in ['COMPLETED', 'RUNNING', 'FAILED']:
+            raise AdapterError('INVALID_CAPTURE_STATE')
+        if completed:
+            at = capture.get('provider_completed_at')
+            if (type(at) not in [int, float] or not math.isfinite(at)
+                    or not capture['provider_started_at'] <= at <= capture['poll_finished_at']
+                    or not isinstance(capture.get('answer'), str)):
+                raise AdapterError('INVALID_COMPLETED_CAPTURE')
+        def pin(journal, data, now):
+            entries = journal['parent_adapter'].setdefault('native_threads', {})
+            ticket = action['dispatch_id']
+            if entries.get(ticket) not in [None, child_id]:
+                raise AdapterError('CAPTURE_THREAD_ID_CONFLICT')
+            entries[ticket] = child_id
+        # Freeze the effective return first; the model body remains data only.
+        key = sha([action_id])
+        status = {'completed': capture['answer']} if completed else ('running' if capture['state'] == 'RUNNING' else 'unknown')
+        result = {'agents': [{'agent_name': action['agent_id'], 'agent_status': status}]}
+        reference = self.handoffs.put('result', key, {
+            'request': request_ref, 'effective_action_ids': [action_id],
+            'measurement_tool': 'codex_app.read_thread',
+            'tool_started_at': capture['poll_started_at'], 'tool_finished_at': capture['poll_finished_at'],
+            # Transport receipt is immutable across an identical redelivery;
+            # the separate registered_at field records local durable admission.
+            'captured_at': capture['poll_finished_at'], 'provider_evidence': capture,
+            'provider_completed_at': capture.get('provider_completed_at'), 'result': result,
+            'error_type': None, 'arguments_mutated': False})
+        self.dispatcher._edit(pin)
+        return {'capture_ref': reference, 'registration': NativeToolDriver(self).ingest(reference)}
+
+    def bind_from_thread(self, request_ref, capture):
+        """Bind from the app's canonical agent-path/thread relation, not typing an ID."""
+        from native_tool_driver import NativeToolDriver
+        call = self.handoffs.read(request_ref)
+        if call['tool'] != 'collaboration.spawn_agent' or len(call['action_ids']) != 1:
+            raise AdapterError('SPAWN_REQUEST_REQUIRED')
+        action_id = call['action_ids'][0]
+        state, action = self._action(action_id, 'SPAWN')
+        if (not isinstance(capture, dict) or capture.get('schema') != 1
+                or capture.get('source') != 'codex_app.read_thread'
+                or capture.get('agent_path') != self._name(state, action)
+                or capture.get('deadline_at') != call['deadlines'][action_id]):
+            raise AdapterError('CAPTURE_AGENT_MISMATCH')
+        child = capture.get('child_thread_id')
+        if not isinstance(child, str) or not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', child):
+            raise AdapterError('CAPTURE_THREAD_ID_REQUIRED')
+        start, finish = capture.get('poll_started_at'), capture.get('poll_finished_at')
+        if (any(type(v) not in [int, float] or not math.isfinite(v) for v in [start, finish])
+                or not 0 <= start <= finish <= self.team.clock()):
+            raise AdapterError('INVALID_CAPTURE_TIME')
+        old = self._config(state).get('native_threads', {}).get(action['dispatch_id'])
+        if old not in [None, child]:
+            raise AdapterError('CAPTURE_THREAD_ID_CONFLICT')
+        reference = self.handoffs.put('result', sha([action_id]), {
+            'request': request_ref, 'tool_started_at': start, 'tool_finished_at': finish,
+            'captured_at': finish, 'measurement_tool': 'codex_app.read_thread',
+            'provider_evidence': capture, 'result': {'task_name': capture['agent_path']},
+            'error_type': None, 'arguments_mutated': False})
+        def pin(journal, data, now):
+            threads = journal['parent_adapter'].setdefault('native_threads', {})
+            if threads.get(action['dispatch_id']) not in [None, child]:
+                raise AdapterError('CAPTURE_THREAD_ID_CONFLICT')
+            threads[action['dispatch_id']] = child
+        self.dispatcher._edit(pin)
+        return {'capture_ref': reference, 'registration': NativeToolDriver(self).ingest(reference)}
 
     def _pending(self, state, action):
         return {'action_id': action['action_id'], 'kind': action['kind'], 'task_id': action['task_id'],
