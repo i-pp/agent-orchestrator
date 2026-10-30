@@ -20,6 +20,8 @@ from storage import STATES
 from verification import normalize_acceptance
 from workspaces import spec
 from chat_mailbox import Mailbox, MailboxError, TOOLS as MAILBOX_TOOLS, validate_arguments as mailbox_arguments
+from codex_pipeline import (TOOLS as PIPELINE_TOOLS, PipelineError,
+                            tool_definitions as pipeline_tools, validate_arguments as pipeline_arguments)
 
 PROJECT = Path(__file__).resolve().parents[1]
 PROTOCOL = '2025-11-25'
@@ -107,7 +109,7 @@ def task_view(task):
     return result
 
 
-def tool_definitions(writes=False, local_llm=False, local_models=False, chat_mailbox=False):
+def tool_definitions(writes=False, local_llm=False, local_models=False, chat_mailbox=False, codex_pipeline=False):
     identifier = {'type': 'string', 'pattern': UUID_PATTERN, 'maxLength': 36}
     def tool(name, description, properties, required=(), read=True):
         return {'name': name, 'description': description,
@@ -167,13 +169,22 @@ def tool_definitions(writes=False, local_llm=False, local_models=False, chat_mai
                 'request_key': {'type': 'string', 'pattern': KEY_PATTERN, 'maxLength': 128}}, ['prompt', 'request_key'], False),
             tool('orchestrator_cancel_task', 'Request cancellation of one task. Does not roll back side effects.',
                  {'task_id': identifier}, ['task_id'], False)]
+    if codex_pipeline:
+        for definition in pipeline_tools():
+            definition['outputSchema'] = {'type': 'object', 'properties': {'call_id': identifier, 'data': {'type': 'object'}},
+                                         'required': ['call_id', 'data'], 'additionalProperties': False}
+            result.append(definition)
     return result
 
 
 class Adapter:
-    def __init__(self, root, allow_writes=False, allow_local_llm=False, allow_local_models=False, allow_chat_mailbox=False, allow_mailbox_grants=False):
+    def __init__(self, root, allow_writes=False, allow_local_llm=False, allow_local_models=False, allow_chat_mailbox=False, allow_mailbox_grants=False,
+                 allow_codex_pipeline=False, pipeline=None):
         self.root = runtime_path(root)
-        self.tools = tool_definitions(allow_writes, allow_local_llm, allow_local_models, allow_chat_mailbox)
+        if pipeline is not None and not allow_codex_pipeline: raise ValueError('Pipeline activation is explicit')
+        if allow_codex_pipeline and pipeline is None: raise ValueError('Pipeline executor must be explicitly connected')
+        self.pipeline = pipeline
+        self.tools = tool_definitions(allow_writes, allow_local_llm, allow_local_models, allow_chat_mailbox, allow_codex_pipeline)
         self.mailbox = Mailbox(self.root) if allow_chat_mailbox else None
         self.grant = None
         if allow_mailbox_grants:
@@ -243,6 +254,9 @@ class Adapter:
     def call_tool(self, name, arguments, rpc_id):
         if name not in {t['name'] for t in self.tools}: raise Invalid('Tool is not enabled')
         if name == 'orchestrator_status': fields(arguments, [])
+        elif name in PIPELINE_TOOLS:
+            try: pipeline_arguments(name, arguments)
+            except PipelineError as exc: raise Invalid(exc.code) from None
         elif name in MAILBOX_TOOLS:
             try: mailbox_arguments(name, arguments)
             except MailboxError as exc: raise Invalid(exc.code) from None
@@ -291,6 +305,16 @@ class Adapter:
         if self.audit.tell() > AUDIT_LIMIT - 4096: raise OSError('Audit capacity reached')
         self.record('begin', **facts)
         try:
+            if name in PIPELINE_TOOLS:
+                try:
+                    data = self.pipeline.dispatch(name, arguments)
+                    failed = data.get('status') in ('UNKNOWN', 'FAILED', 'BLOCKED') or data.get('state') == 'UNKNOWN'
+                except PipelineError as exc:
+                    data, failed = exc.result(), True
+                self.record('end', outcome='error_or_uncertain' if failed else 'returned', **facts)
+                content = {'call_id': call_id, 'data': data}
+                return {'content': [{'type': 'text', 'text': json.dumps(content)}],
+                        'structuredContent': content, 'isError': failed}
             if name in MAILBOX_TOOLS:
                 try:
                     backend=(self.grant if self.grant is not None and arguments['task_id']==self.grant.policy.task_id else self.mailbox)
@@ -527,12 +551,22 @@ def main():
                         help='Separately approved fixed-slot non-secret mailbox; default off')
     parser.add_argument('--allow-mailbox-grants',action='store_true',
                         help='Explicit finite workstream grant; requires mailbox and private grant policy, default off')
+    parser.add_argument('--allow-codex-pipeline', action='store_true',
+                        help='Separately approved app-server executor; requires private fixed policy, default off')
     args = parser.parse_args()
     os.umask(0o077)
-    try: return serve(Adapter(args.runtime, args.allow_writes, args.allow_local_llm, args.allow_local_models, args.allow_chat_mailbox, args.allow_mailbox_grants))
+    pipeline = None
+    try:
+        if args.allow_codex_pipeline:
+            from codex_pipeline import build_pipeline
+            pipeline = build_pipeline(runtime_path(args.runtime), PROJECT)
+        return serve(Adapter(args.runtime, args.allow_writes, args.allow_local_llm, args.allow_local_models,
+                             args.allow_chat_mailbox, args.allow_mailbox_grants, args.allow_codex_pipeline, pipeline))
     except (OSError, ValueError, TypeError, sqlite3.Error):
         print('Adapter startup refused: verify private runtime and operator policy.', file=sys.stderr)
         return 1
+    finally:
+        if pipeline is not None: pipeline.transport.close()
 
 
 if __name__ == '__main__': raise SystemExit(main())
