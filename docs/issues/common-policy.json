@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "policy_version": "1.0",
+  "policy_sha256": "8fede5f946fd944485e7095ea27cb4923fb97ebf466d1e4b355ad21a50a00286",
+  "issues": [
+    {
+      "id": "POL-001",
+      "severity": "S1 High",
+      "state": "BLOCKED",
+      "problem": "通常native検査は承認後に成功したが、対象repoのproject layerは明示的trust不足で無効（config/readのdisabledReasonで確認）",
+      "impact": "repo規約・禁止指示・共通Skillの記載は読めたが、4 roleと子2枠が有効になっていない",
+      "temporary_action": "祖先<USER_HOME>の既存trusted設定を保全し、新しいrepo trustは追加しない。prompt-input/config/readの結果を記録して独立作業を継続する",
+      "revisit_when": "対象repo自身のtrust追加について別途明示承認が得られ、最新global設定と両立して通常nativeの再確認を行う時"
+    },
+    {
+      "id": "POL-002",
+      "severity": "S2 Medium",
+      "state": "DEFERRED",
+      "problem": "ChatGPT/Dot/localへの本文payloadは組立てのみで自動配送・受領は未接続",
+      "impact": "共通repoへの参照更新だけで全環境が本文をロードしたとは保証できない",
+      "temporary_action": "明示的なpacket/messagesを生成し、各経路の確認範囲を報告する。現用30BとMCP公開を変えない",
+      "revisit_when": "既存の許可された送受信経路で本文hashの受領照合が実施できる時"
+    },
+    {
+      "id": "POL-003",
+      "severity": "S2 Medium",
+      "state": "DEFERRED",
+      "problem": "policyが定めるDAG/予算/判断状態の全体自動制御やsemanticな指示矛盾解決はloaderの対象外",
+      "impact": "本文を受け取ったモデルの遵守、金額上限、自律復旧まで完成したとは言えない",
+      "temporary_action": "既存の拒否判定と運用境界を維持し、共通本文の提供と実行制御の完成度を区別する",
+      "revisit_when": "自動dispatch/状態遷移/予算監視を個別に実装・受入検証するマイルストーンになった時"
+    },
+    {
+      "id": "POL-004",
+      "severity": "S2 Medium",
+      "state": "DEFERRED",
+      "problem": "旧実行には共通policy hashが記録されていない",
+      "impact": "旧turnで用いたpolicyとの同一性は遡及証明できない",
+      "temporary_action": "legacy-unpinnedを明示し、再開時に現行の検証済み本文を渡す。既にpin済みのsourceとの不一致は拒否する",
+      "revisit_when": "legacy履歴の移行要件や厳密な過去policy復元が必要になった時"
+    },
+    {
+      "id": "POL-005",
+      "severity": "S2 Medium",
+      "state": "DEFERRED",
+      "problem": "初期比較では変更前後とも既存6件が失敗。その後fixtureのmetadata修正と追加隔離禁止ガードを適用し、namespace依存の実機検証を保留している",
+      "impact": "実OS隔離・強制停止を含む全受入成功をこの環境では保証できない",
+      "temporary_action": "隔離必須試験を隔離なしへ変更せず、BLOCKED/未実行として扱う。fixture修正を保全し、mock/単体検証と新旧の記録を区別する",
+      "revisit_when": "既存のnamespace検証を実行できる許可済み環境で再確認できる時"
+    }
+  ]
+}

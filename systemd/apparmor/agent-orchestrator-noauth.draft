@@ -1,0 +1,80 @@
+# DESIGN ONLY. DO NOT LOAD / INSTALL. Not a working Codex deployment profile.
+# Fixed no-auth fixture; SESSION must be instantiated and reviewed before any test.
+# Future native static entrypoints do not exist. No Python/Codex exec is allowed.
+abi <abi/5.0>,
+include <tunables/global>
+
+@{AO_ENTRY}=/usr/libexec/agent-orchestrator/ns-entry
+@{AO_GATE}=/usr/libexec/agent-orchestrator/payload-gate
+# Example path only. Replace AO_PROJECT and review the draft before any use.
+@{AO_PROJECT}=/path/to/agent-orchestrator
+@{AO_SESSION}=@{AO_PROJECT}/.runtime/REVIEW_REQUIRED_SESSION
+@{AO_JAIL}=@{AO_SESSION}/tmp/jail
+
+profile ao-e3-noauth-setup @{AO_ENTRY} {
+  @{AO_ENTRY} mr,
+  # AppArmor permission only: does not confer host kernel capabilities.
+  userns create,
+  capability sys_admin,
+  # Needed by the future native gate to drop the capability bounding set.
+  capability setpcap,
+  # owner means UID ownership; @{pid} matches PID patterns, NOT only self.
+  # Native code must use its own proc FD; this coarse grant is a review risk.
+  owner /proc/@{pid}/{uid_map,gid_map,setgroups} rw,
+  owner /proc/@{pid}/{status,stat,mountinfo} r,
+  /proc/sys/kernel/random/boot_id r,
+
+  owner @{AO_SESSION}/ r,
+  owner @{AO_SESSION}/tmp/ rw,
+  owner @{AO_JAIL}/ rw,
+  owner @{AO_JAIL}/** rw,
+  /usr/ r,
+  /etc/ r,
+  /dev/{null,zero,full,tty,random,urandom} rw,
+
+  # Exact destinations, fixed source set, no blanket mount/umount/pivot rules.
+  # Filesystem data (e.g. tmpfs size) must also be fixed by the native helper.
+  mount options=(rw,rprivate) -> /,
+  mount fstype=tmpfs options=(rw,nosuid,nodev) tmpfs -> @{AO_JAIL}/,
+  mount options=(rw,bind) /usr/ -> @{AO_JAIL}/usr/,
+  mount options=(rw,bind) /etc/ -> @{AO_JAIL}/etc/,
+  mount options=(rw,bind) @{AO_SESSION}/ -> @{AO_JAIL}@{AO_SESSION}/,
+  mount options=(rw,bind) @{AO_SESSION}/codex-home/ -> @{AO_JAIL}@{AO_SESSION}/codex-home/,
+  mount options=(rw,bind) @{AO_SESSION}/workspace/ -> @{AO_JAIL}@{AO_SESSION}/workspace/,
+  mount options=(ro,remount,bind,nosuid,nodev) -> @{AO_JAIL}/{usr,etc}/,
+  mount options=(ro,remount,bind,nosuid,nodev) -> @{AO_JAIL}@{AO_SESSION}/,
+  mount options=(ro,remount,bind,nosuid,nodev) -> @{AO_JAIL}@{AO_SESSION}/workspace/,
+  mount fstype=tmpfs options=(ro) tmpfs -> @{AO_JAIL}@{AO_SESSION}/codex-home/,
+  mount fstype=proc options=(rw,nosuid,nodev,noexec) proc -> @{AO_JAIL}/proc/,
+  mount fstype=tmpfs options=(rw,nosuid,noexec) tmpfs -> @{AO_JAIL}/dev/,
+  mount options=(rw,bind) /dev/null -> @{AO_JAIL}/dev/null,
+  mount options=(rw,bind) /dev/zero -> @{AO_JAIL}/dev/zero,
+  mount options=(rw,bind) /dev/full -> @{AO_JAIL}/dev/full,
+  mount options=(rw,bind) /dev/tty -> @{AO_JAIL}/dev/tty,
+  mount options=(rw,bind) /dev/random -> @{AO_JAIL}/dev/random,
+  mount options=(rw,bind) /dev/urandom -> @{AO_JAIL}/dev/urandom,
+  mount fstype=tmpfs options=(rw,nosuid,nodev) tmpfs -> @{AO_JAIL}/tmp/,
+  mount fstype=tmpfs options=(rw,nosuid,nodev) tmpfs -> @{AO_JAIL}/var/tmp/,
+  mount options=(ro,remount,bind,nosuid,nodev) -> @{AO_JAIL}/,
+  pivot_root oldroot=@{AO_JAIL}/oldroot/ @{AO_JAIL}/,
+  umount /oldroot/,
+
+  # Replacement without inherit/unconfined fallback; missing target fails closed.
+  @{AO_GATE} Px -> ao-e3-locked-payload,
+  signal (receive) peer=unconfined,
+  # No network, dbus, arbitrary exec, change_profile, or authentication access.
+}
+
+# Deliberately closed boundary model, NOT the final nested-sandbox policy.
+# A deployable Codex payload policy needs separate reviewed rules and tests.
+profile ao-e3-locked-payload {
+  @{AO_GATE} mr,
+  owner /proc/@{pid}/status r,
+  audit deny capability,
+  audit deny userns,
+  audit deny mount,
+  audit deny umount,
+  audit deny pivot_root,
+  audit deny change_profile,
+  signal (receive) peer=unconfined,
+}

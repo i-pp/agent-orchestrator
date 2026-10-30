@@ -1,0 +1,31 @@
+{
+  "fixture-check": {
+    "argv": [
+      "/usr/bin/python3",
+      "-B",
+      "-c",
+      "from pathlib import Path; import sys; sys.exit(0 if Path('fixture.txt').read_text().strip() == 'phase1-marker: CERULEAN-17' else 1)"
+    ],
+    "timeout": 5
+  },
+  "workspace-result-check": {
+    "argv": [
+      "/usr/bin/python3",
+      "-B",
+      "-c",
+      "from pathlib import Path; assert Path('result.txt').read_bytes() == Path('expected.txt').read_bytes(); print('workspace content verified')"
+    ],
+    "timeout": 10
+  },
+  "poc-calculator-tests": {
+    "argv": [
+      "/usr/bin/python3",
+      "-B",
+      "-m",
+      "unittest",
+      "-v",
+      "test_calculator"
+    ],
+    "timeout": 10
+  }
+}

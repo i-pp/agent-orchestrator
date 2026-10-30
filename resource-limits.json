@@ -1,0 +1,10 @@
+{
+  "cpu_percent": 100,
+  "cpu_budget_ms": 60000,
+  "memory_bytes": 2147483648,
+  "pids": 512,
+  "file_bytes": 67108864,
+  "runtime_bytes": 2147483648,
+  "free_bytes": 1073741824,
+  "log_bytes": 33554432
+}

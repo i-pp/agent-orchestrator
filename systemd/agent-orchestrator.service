@@ -1,0 +1,29 @@
+[Unit]
+Description=Agent Orchestrator private task scheduler
+StartLimitIntervalSec=600
+StartLimitBurst=3
+
+[Service]
+Type=simple
+WorkingDirectory=%h/src/agent-orchestrator
+# Operator creates this file with CODEX_BINARY=/absolute/path/to/codex.
+# No environment file is installed or modified by this repository.
+EnvironmentFile=%h/.config/agent-orchestrator/daemon.env
+ExecStart=/usr/bin/python3 -B %h/src/agent-orchestrator/src/runner.py --runtime %h/src/agent-orchestrator/.runtime/systemd-e3 --codex ${CODEX_BINARY} daemon
+ExecStartPost=/usr/bin/python3 -B %h/src/agent-orchestrator/scripts/service_wait.py daemon --runtime %h/src/agent-orchestrator/.runtime/systemd-e3 --unit %n --timeout 20
+TimeoutStartSec=30
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=60
+KillMode=mixed
+UMask=0077
+CPUQuota=50%
+CPUQuotaPeriodSec=100ms
+MemoryMax=512M
+MemorySwapMax=0
+TasksMax=64
+LimitCORE=0
+LimitFSIZE=64M
+StandardOutput=journal
+StandardError=journal
+# Manual start only. Enabling login startup requires a separate reviewed change.

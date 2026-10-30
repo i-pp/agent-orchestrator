@@ -1,0 +1,36 @@
+# EXAMPLE ONLY. Copy to the ignored local service path after reviewing host paths.
+# The local profile supplies the Tunnel ID; no live identifier is embedded here.
+[Unit]
+Description=Aceis read-only Secure MCP Tunnel
+BindsTo=agent-orchestrator.service
+After=agent-orchestrator.service
+PartOf=agent-orchestrator.service
+StartLimitIntervalSec=600
+StartLimitBurst=3
+
+[Service]
+Type=exec
+WorkingDirectory=%h/src/agent-orchestrator
+LoadCredential=control-plane-api-key:%h/.config/agent-orchestrator/credentials/control-plane-api-key
+UnsetEnvironment=CONTROL_PLANE_API_KEY OPENAI_API_KEY OPENAI_ADMIN_KEY LOG_HTTP_RAW_UNSAFE MCP_SERVER_URL MCP_COMMAND HARPOON_TARGETS HARPOON_ADDITIONAL_TRANSPORTS TUNNEL_CLIENT_CONFIG TUNNEL_CLIENT_PROFILE TUNNEL_CLIENT_PROFILE_FILE TUNNEL_CLIENT_PROFILE_DIR
+ExecStartPre=/usr/bin/test -s %d/control-plane-api-key
+ExecStartPre=/usr/bin/python3 -B %h/src/agent-orchestrator/scripts/service_wait.py daemon --runtime %h/src/agent-orchestrator/.runtime/systemd-e3 --unit agent-orchestrator.service --timeout 20
+ExecStart=%h/.local/opt/tunnel-client/v0.0.18/tunnel-client run --profile-file %h/src/agent-orchestrator/systemd/aceis-mcp-tunnel.yaml --control-plane.base-url=https://api.openai.com --control-plane.api-key=file:%d/control-plane-api-key --mcp.command "channel=main,command=/usr/bin/python3 -B %h/src/agent-orchestrator/src/mcp_adapter.py --runtime %h/src/agent-orchestrator/.runtime/systemd-e3" --health.listen-addr=127.0.0.1:0 --health.url-file=%t/aceis-mcp-tunnel/health-url --log.http-raw-unsafe=false --log.level=warn
+ExecStartPost=/usr/bin/python3 -B %h/src/agent-orchestrator/scripts/service_wait.py tunnel --client %h/.local/opt/tunnel-client/v0.0.18/tunnel-client --url-file %t/aceis-mcp-tunnel/health-url --timeout 75
+RuntimeDirectory=aceis-mcp-tunnel
+RuntimeDirectoryMode=0700
+TimeoutStartSec=100
+TimeoutStopSec=20
+KillMode=mixed
+Restart=on-failure
+RestartSec=5
+UMask=0077
+CPUQuota=25%
+CPUQuotaPeriodSec=100ms
+MemoryMax=256M
+MemorySwapMax=0
+TasksMax=64
+LimitCORE=0
+StandardOutput=journal
+StandardError=journal
+# Manual start only. No Install section and no user-manager secret environment.

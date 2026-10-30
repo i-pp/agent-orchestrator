@@ -1,0 +1,11 @@
+{
+  "artifacts": [
+    {
+      "path": "result.txt",
+      "sha256": "2ed5ac674980b2c03d93874c1e20a0ffb9eb3477dd2dd31ef6fa602aa2ccd22e"
+    }
+  ],
+  "tests": [
+    "workspace-result-check"
+  ]
+}

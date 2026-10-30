@@ -1,0 +1,5 @@
+{
+  "task_id": "e215caa9-1c67-5750-91f0-2fc8e0ce912c",
+  "request_id": "0aede1c6-3f73-54e0-a942-ab6e61f48da2",
+  "request": "Review this recovery checklist: use saved key/codex references and all capability flags; require idle DB and owned units; preflight before stop; after restart verify READY, health and eleven tools; on UNKNOWN reconcile getters without resending writes. Identify at most three concrete missing checks. Do not execute commands."
+}

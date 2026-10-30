@@ -1,0 +1,6 @@
+{
+  "artifacts": [{"path": "fixture.txt", "sha256": "8c2e2a6987a3c8d4b699f8397994e7d0c8bccc1c07f3d5f386a2316f70709833"}],
+  "tests": ["fixture-check"],
+  "conditions": [{"kind": "result_contains", "value": "CERULEAN-17"}],
+  "human": false
+}

@@ -1,0 +1,17 @@
+{
+  "poll_seconds": 0.2,
+  "task_timeout": 120,
+  "shutdown_seconds": 15,
+  "daemon": {
+    "cpu_percent": 50,
+    "cpu_budget_ms": 86400000,
+    "memory_bytes": 536870912,
+    "pids": 64
+  },
+  "worker": {
+    "cpu_percent": 100,
+    "cpu_budget_ms": 60000,
+    "memory_bytes": 268435456,
+    "pids": 32
+  }
+}

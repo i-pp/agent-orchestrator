@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "issues": [
+    {
+      "id": "OPS-CANONICAL-PATH",
+      "status": "DEFERRED",
+      "problem": "docs/ai/orchestration.md was not found locally; the named remote repository is empty.",
+      "impact": "Cannot claim conformance to an unseen document.",
+      "workaround": "Use the verified policies.md v1.0 without inventing a second canonical text.",
+      "revisit_when": "The canonical document or verified location is supplied."
+    },
+    {
+      "id": "OPS-NEXT-SLOT",
+      "status": "BLOCKED",
+      "problem": "Only the original completed slot is approved in the live allowlist.",
+      "impact": "A different normal task cannot be registered yet.",
+      "workaround": "Prepare exact immutable request/policy candidates offline; keep live scope unchanged.",
+      "revisit_when": "The exact new slot, text/hash and deployment effects are approved."
+    },
+    {
+      "id": "OPS-DOT-CATALOG",
+      "status": "DEFERRED",
+      "problem": "The parent dot catalog has not exposed the four mailbox tools.",
+      "impact": "Direct dot calls remain unverified.",
+      "workaround": "Use the explicitly identified local Codex MCP stdio route and keep hosted/direct claims separate.",
+      "revisit_when": "A supported catalog refresh exposes the tools to dot and a direct read succeeds."
+    },
+    {
+      "id": "OPS-CHAT-WAKE",
+      "status": "DEFERRED",
+      "problem": "The mailbox cannot start a resting Chat.",
+      "impact": "Pure dot-to-Chat autonomous initiation is incomplete.",
+      "workaround": "Use the existing authorized Codex send route only for specifically authorized requests.",
+      "revisit_when": "A supported authorized Chat initiation interface is available."
+    },
+    {
+      "id": "OPS-GIT-INITIAL",
+      "status": "ACCEPTED",
+      "problem": "Initial publication to the existing private i-pp/agent-orchestrator was explicitly authorized. The prior local history contains personal absolute paths.",
+      "impact": "Do not import unnecessary historical machine paths.",
+      "workaround": "Publish only the reviewed portable working-tree snapshot through the existing connected GitHub account; retain the original local history and index.",
+      "revisit_when": "Initial private publication and branch/commit/file readback are verified."
+    }
+  ]
+}
