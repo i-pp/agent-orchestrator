@@ -64,7 +64,9 @@ def credential_metadata(path):
 
 
 class Services:
-    def __init__(self, runtime=RUNTIME, codex=CODEX, key_file=KEY, allow_local_llm=False, allow_local_models=False, allow_chat_mailbox=False):
+    def __init__(self, runtime=RUNTIME, codex=CODEX, key_file=KEY, allow_local_llm=False, allow_local_models=False, allow_chat_mailbox=False, allow_mailbox_grants=False):
+        if allow_mailbox_grants and not allow_chat_mailbox:
+            raise Refused('Mailbox grants require the chat mailbox capability')
         self.root = Path(runtime).expanduser().absolute()
         if (self.root.parent != PROJECT/'.runtime' or not re.fullmatch(r'development-poc-[A-Za-z0-9_-]{1,80}', self.root.name)
                 or any(p.is_symlink() for p in [self.root, *self.root.parents])):
@@ -84,6 +86,7 @@ class Services:
         self.allow_local_llm = allow_local_llm
         self.allow_local_models = allow_local_models
         self.allow_chat_mailbox = allow_chat_mailbox
+        self.allow_mailbox_grants = allow_mailbox_grants
 
     @contextmanager
     def locked(self):
@@ -124,7 +127,9 @@ class Services:
                 or not isinstance(value.get('token'), str) or not re.fullmatch(r'[0-9a-f]{32}', value['token'])
                 or value.get('units') != self.units or not isinstance(value.get('invocations'), dict)
                 or set(value['invocations']) - set(self.units)
-                or value.get('phase') not in ['STARTING', 'READY', 'STOPPED', 'FAILED', 'CLEANUP_UNCONFIRMED']):
+                or value.get('phase') not in ['STARTING', 'READY', 'STOPPED', 'FAILED', 'CLEANUP_UNCONFIRMED']
+                or type(value.get('mailbox_grants_enabled', False)) is not bool
+                or (value.get('mailbox_grants_enabled', False) and value.get('chat_mailbox_enabled') is not True)):
             raise Refused('State ownership record is invalid')
         return value
 
@@ -161,16 +166,20 @@ class Services:
                 'credential_reader_uid': os.getuid(), 'credential_transport': 'native file: reference; no copy or environment value',
                 'state_file': str(self.root/STATE), 'logs': str(self.root/'logs'), 'health_file': str(self.health),
                 'automatic_start': False, 'survives_terminal_close': True, 'survives_logout_or_reboot': False, 'local_llm_enabled': self.allow_local_llm, 'local_models_enabled': self.allow_local_models,
-                'chat_mailbox_enabled': getattr(self, 'allow_chat_mailbox', False)}
+                'chat_mailbox_enabled': getattr(self, 'allow_chat_mailbox', False),
+                'mailbox_grants_enabled': getattr(self, 'allow_mailbox_grants', False)}
 
     def commands(self):
+        if getattr(self, 'allow_mailbox_grants', False) and not getattr(self, 'allow_chat_mailbox', False):
+            raise Refused('Mailbox grants require the chat mailbox capability')
         daemon = ['/usr/bin/python3', '-B', str(PROJECT/'src/runner.py'), '--runtime', str(self.root),
                   '--codex', str(self.codex), '--development-poc', 'daemon']
         adapter = shlex.join(['/usr/bin/env', '-u', 'CONTROL_PLANE_API_KEY', '-u', 'OPENAI_API_KEY', '-u', 'OPENAI_ADMIN_KEY',
                              '/usr/bin/python3', '-B', str(PROJECT/'src/mcp_adapter.py'), '--runtime', str(self.root),
                              *(['--allow-local-llm'] if self.allow_local_llm else []),
                              *(['--allow-local-models'] if getattr(self, 'allow_local_models', False) else []),
-                             *(['--allow-chat-mailbox'] if getattr(self, 'allow_chat_mailbox', False) else [])])
+                             *(['--allow-chat-mailbox'] if getattr(self, 'allow_chat_mailbox', False) else []),
+                             *(['--allow-mailbox-grants'] if getattr(self, 'allow_mailbox_grants', False) else [])])
         tunnel = [str(self.client), 'run', '--profile-file', str(PROJECT/'systemd/aceis-mcp-tunnel.yaml'),
                   '--control-plane.base-url=https://api.openai.com',
                   '--control-plane.tunnel-id=tunnel_6ae1d745be7c8191b6d502b613317b4c',
@@ -190,7 +199,7 @@ class Services:
                               "('QUEUED','RUNNING','VERIFYING','UNKNOWN','WAITING_FOR_HUMAN')").fetchone()[0]:
                     raise Refused('Unresolved work requires reconciliation before service interruption')
 
-    def recovery_plan(self, rollback_mailbox=False):
+    def recovery_plan(self, rollback_mailbox=False, rollback_grants=False):
         """Return existing CLI argument arrays from recorded configuration, without applying them."""
         with self.locked():
             state = self.read_state()
@@ -205,6 +214,8 @@ class Services:
             for field in ['local_llm_enabled','local_models_enabled','chat_mailbox_enabled']:
                 if type(state.get(field)) is not bool:
                     raise Refused('Recorded invocation is incomplete; do not guess capability flags')
+            if type(state.get('mailbox_grants_enabled',False)) is not bool:
+                raise Refused('Recorded mailbox grant flag is invalid')
             observed = {}
             for role, name in self.units.items():
                 props = self.show(name)
@@ -221,12 +232,14 @@ class Services:
                 raise Refused('Recorded task database is missing; reconcile before recovery')
             candidate = type(self)(self.root,references[1],references[0],
                                    state['local_llm_enabled'],state['local_models_enabled'],
-                                   False if rollback_mailbox else state['chat_mailbox_enabled'])
+                                   False if rollback_mailbox else state['chat_mailbox_enabled'],
+                                   False if rollback_mailbox or rollback_grants else state.get('mailbox_grants_enabled',False))
             checked = candidate.preflight(references[0])
             flags = [flag for enabled,flag in [
                 (candidate.allow_local_llm,'--allow-local-llm'),
                 (candidate.allow_local_models,'--allow-local-models'),
-                (candidate.allow_chat_mailbox,'--allow-chat-mailbox')] if enabled]
+                (candidate.allow_chat_mailbox,'--allow-chat-mailbox'),
+                (candidate.allow_mailbox_grants,'--allow-mailbox-grants')] if enabled]
             base = ['/usr/bin/python3','-B',str(PROJECT/'scripts/poc_services.py')]
             common = ['--runtime',str(candidate.root),'--key-file',str(candidate.key),
                       '--codex',str(candidate.codex)]
@@ -235,7 +248,7 @@ class Services:
                 'stop':base+['stop',*common,'--apply'],
                 'start':base+['start',*common,*flags,'--apply'],
                 'status':base+['status',*common]}
-            return {'operation':'rollback-plan' if rollback_mailbox else 'resume-plan',
+            return {'operation':'rollback-plan' if rollback_mailbox else ('grant-rollback-plan' if rollback_grants else 'resume-plan'),
                     'automatic_apply':False,'revalidate_before_apply':True,
                     'state_sha256':hashlib.sha256((self.root/STATE).read_bytes()).hexdigest(),
                     'observed_units':observed,'preflight':checked,'commands':commands,
@@ -275,11 +288,24 @@ class Services:
                 raise Refused('Unsafe helper directory')
             for script in ['extension.py','selection_extension.py']:
                 if not (helper/script).is_file(): raise Refused('Local helper entry point is missing')
-        policy_hash, slots = None, 0
+        policy_hash, slots, grant_hash, grant_task_id = None, 0, None, None
         if self.allow_chat_mailbox:
             from chat_mailbox import Mailbox
             _, allowed, policy_hash = Mailbox.policy_snapshot(self.root)
             slots = len(allowed)
+        if getattr(self,'allow_mailbox_grants',False):
+            if not self.allow_chat_mailbox:
+                raise Refused('Mailbox grants require the chat mailbox capability')
+            from mailbox_grants import load_runtime_grant
+            # Validate configuration only: expired grants still allow retained answer reads.
+            # Never initialize the grant ledger during preflight.
+            grant = load_runtime_grant(self.root)
+            if any(task_id == grant.task_id for task_id, _ in allowed):
+                raise Refused('Grant task collides with a static mailbox task')
+            grant_hash, grant_task_id = grant.sha256(), grant.task_id
+            if (self.root/'mailbox-grants-prepared.sqlite').exists():
+                from mailbox_grants import GrantLedger
+                GrantLedger(self.root,grant,enabled=True,create=False).status()
         commands = self.commands()
         if commands['tunnel'].count('--control-plane.api-key=file:'+str(self.key)) != 1:
             raise Refused('Credential argument was not inherited')
@@ -288,15 +314,18 @@ class Services:
         adapter = shlex.split(argument.split('command=',2)[-1])
         for attribute, flag in [('allow_local_llm','--allow-local-llm'),
                                 ('allow_local_models','--allow-local-models'),
-                                ('allow_chat_mailbox','--allow-chat-mailbox')]:
-            if adapter.count(flag) != int(getattr(self,attribute)):
+                                ('allow_chat_mailbox','--allow-chat-mailbox'),
+                                ('allow_mailbox_grants','--allow-mailbox-grants')]:
+            if adapter.count(flag) != int(getattr(self,attribute,False)):
                 raise Refused('Adapter capability argument was not inherited')
         if '--allow-writes' in adapter: raise Refused('Task writes are outside this service scope')
         return {'passed':True,'credential_file_reference':key['path'],'credential_mode':key['mode'],
                 'credential_contents_read':False,'tool_names':[t['name'] for t in tool_definitions(
                     False,self.allow_local_llm,self.allow_local_models,self.allow_chat_mailbox)],
                 'mailbox_policy_sha256':policy_hash,'mailbox_allowed_slots':slots,
-                'stops_or_launches':0,'mailbox_db_created':False}
+                'mailbox_grants_enabled':getattr(self,'allow_mailbox_grants',False),
+                'mailbox_grant_policy_sha256':grant_hash,'mailbox_grant_task_id':grant_task_id,
+                'stops_or_launches':0,'mailbox_db_created':False,'mailbox_grant_db_created':False}
 
     def launch(self, state, role, argv):
         name = self.units[role]
@@ -376,7 +405,8 @@ class Services:
             state = {'schema': 1, 'runtime': str(self.root), 'token': uuid.uuid4().hex,
                      'units': self.units, 'invocations': {}, 'phase': 'STARTING', 'updated': time.time(),
                      'local_llm_enabled': self.allow_local_llm, 'local_models_enabled': self.allow_local_models,
-                     'chat_mailbox_enabled': self.allow_chat_mailbox}
+                     'chat_mailbox_enabled': self.allow_chat_mailbox,
+                     'mailbox_grants_enabled': getattr(self,'allow_mailbox_grants',False)}
             state.update(credential_file_reference=str(self.key),codex_file_reference=str(self.codex))
             self.write_state(state)
             try:
@@ -426,7 +456,7 @@ class Services:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('operation', choices=['plan', 'resume-plan', 'rollback-plan', 'preflight', 'start', 'status', 'stop'])
+    parser.add_argument('operation', choices=['plan', 'resume-plan', 'rollback-plan', 'grant-rollback-plan', 'preflight', 'start', 'status', 'stop'])
     parser.add_argument('--runtime', type=Path, default=RUNTIME)
     parser.add_argument('--codex', type=Path, default=CODEX)
     parser.add_argument('--key-file', type=Path, default=KEY)
@@ -439,14 +469,19 @@ def main():
                         help='Approved fixed-profile HTTP model lifecycle')
     parser.add_argument('--allow-chat-mailbox', action='store_true',
                         help='Separately approved fixed-slot question/answer mailbox; default off')
+    parser.add_argument('--allow-mailbox-grants', action='store_true',
+                        help='Separately approved bounded workstream grant; requires --allow-chat-mailbox; default off')
     args = parser.parse_args()
     if args.operation in ['start', 'stop'] and not args.apply:
         parser.error('start/stop require --apply after operator approval')
     os.umask(0o077)
     try:
-        services = Services(args.runtime, args.codex, args.key_file, args.allow_local_llm, args.allow_local_models, args.allow_chat_mailbox)
+        options = {'allow_mailbox_grants':True} if args.allow_mailbox_grants else {}
+        services = Services(args.runtime, args.codex, args.key_file, args.allow_local_llm, args.allow_local_models, args.allow_chat_mailbox, **options)
         if args.operation in ['resume-plan','rollback-plan']:
             result = services.recovery_plan(args.operation == 'rollback-plan')
+        elif args.operation == 'grant-rollback-plan':
+            result = services.recovery_plan(rollback_grants=True)
         elif args.operation == 'preflight':
             result = services.preflight(args.expected_key_file)
         else:

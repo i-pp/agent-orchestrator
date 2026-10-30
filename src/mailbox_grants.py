@@ -1,4 +1,4 @@
-"""Prepared bounded workstream grants; deliberately not wired to MCP or services.
+"""Bounded workstream grants, enabled only by explicit operator configuration.
 
 The constructor defaults OFF. All persistence is in a separate fixed ledger.
 This module cannot create tasks, read arbitrary files, execute commands or wake Chat.
@@ -13,7 +13,7 @@ import sqlite3
 import stat
 import time
 
-from chat_mailbox import MailboxError, TOOLS, validate_arguments, digest, _private
+from chat_mailbox import MailboxError, TOOLS, validate_arguments, digest, _private, _json
 
 DAY=86400
 MAX_DB_BYTES=1024*1024
@@ -61,9 +61,28 @@ class GrantPolicy:
     def sha256(self):return hashlib.sha256(json.dumps(self.metadata(),sort_keys=True,separators=(',',':')).encode()).hexdigest()
 
 
+def load_runtime_grant(runtime,*,require_enabled=True):
+    """Read only the operator-fixed private configuration; never initialize a ledger."""
+    root=Path(runtime).absolute()
+    if any(p.is_symlink() for p in [root,*root.parents]):raise GrantError('UNSAFE_GRANT_RUNTIME')
+    info=root.stat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.getuid() or stat.S_IMODE(info.st_mode)!=0o700:
+        raise GrantError('UNSAFE_GRANT_RUNTIME')
+    path=root/'chat-mailbox-grant.json'
+    try:_private(path,16384);config=_json(path.read_bytes())
+    except MailboxError:raise GrantError('INVALID_GRANT_CONFIGURATION') from None
+    if (not isinstance(config,dict) or set(config)!={'schema_version','enabled','policy','policy_sha256'}
+            or type(config['schema_version']) is not int or config['schema_version']!=1
+            or type(config['enabled']) is not bool):raise GrantError('INVALID_GRANT_CONFIGURATION')
+    policy=GrantPolicy.from_dict(config['policy'])
+    if config['policy_sha256']!=policy.sha256():raise GrantError('GRANT_POLICY_HASH_MISMATCH')
+    if require_enabled and config['enabled'] is not True:raise GrantError('GRANTS_DISABLED')
+    return policy
+
+
 class GrantLedger:
-    """Atomic fixture-ready enforcement. No live integration or policy installation API."""
-    def __init__(self,runtime,policy,*,enabled=False,clock=time.time):
+    """Atomic bounded enforcement; no policy installation or public cancellation API."""
+    def __init__(self,runtime,policy,*,enabled=False,clock=time.time,create=True):
         if enabled is not True:raise GrantError('GRANTS_DISABLED')
         if not isinstance(policy,GrantPolicy):raise GrantError('INVALID_GRANT_POLICY')
         self.policy=GrantPolicy.from_dict(policy.metadata())
@@ -74,6 +93,12 @@ class GrantLedger:
         if not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.getuid() or stat.S_IMODE(info.st_mode)!=0o700:
             raise GrantError('UNSAFE_GRANT_RUNTIME')
         self.path=self.root/'mailbox-grants-prepared.sqlite'
+        if not create:
+            _private(self.path,MAX_DB_BYTES)
+            with self._db() as db:
+                if db.execute('PRAGMA user_version').fetchone()[0]!=1:raise GrantError('GRANT_SCHEMA_MISMATCH')
+                self._state(db)
+            return
         try:fd=os.open(self.path,os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o600)
         except FileExistsError:pass
         else:os.close(fd)
@@ -124,6 +149,12 @@ class GrantLedger:
         if now<self.policy.not_before:raise GrantError('GRANT_NOT_YET_ACTIVE')
         if now>=self.policy.expires_at:raise GrantError('GRANT_EXPIRED')
 
+    def _grant_state(self,state,now):
+        if state['revoked']:return 'REVOKED'
+        if now<self.policy.not_before:return 'NOT_YET_ACTIVE'
+        if now>=self.policy.expires_at:return 'EXPIRED'
+        return 'ACTIVE'
+
     def _row(self,db,args):
         row=db.execute('SELECT * FROM messages WHERE grant_id=? AND request_id=?',(self.policy.grant_id,args['request_id'])).fetchone()
         if row:
@@ -153,9 +184,10 @@ class GrantLedger:
         if args['task_id']!=self.policy.task_id:raise GrantError('GRANT_TASK_NOT_ALLOWED')
         for key in ['request','answer']:
             if key in args and len(args[key].encode())>self.policy.max_text_bytes:raise GrantError('GRANT_TEXT_LIMIT')
-        write=name in (TOOLS[0],TOOLS[2]);now=self._now()
+        write=name in (TOOLS[0],TOOLS[2])
         try:
             with self._db(write) as db:
+                now=self._now()  # Re-evaluate after acquiring the write lock, never before it.
                 state=self._state(db);row=self._row(db,args);duplicate=False
                 if write:self._active(state,now)
                 if name==TOOLS[0]:
@@ -181,7 +213,7 @@ class GrantLedger:
                         db.execute('UPDATE messages SET answer=?,answer_sha256=?,answered_at=? WHERE grant_id=? AND request_id=?',
                             (args['answer'],digest(args['answer']),now,self.policy.grant_id,args['request_id']))
                 row=self._row(db,args)
-                status='NOT_FOUND'
+                status='REVOKED' if state['revoked'] else 'NOT_FOUND'
                 readable=False
                 if row:
                     if state['revoked']:status='REVOKED'
@@ -192,7 +224,8 @@ class GrantLedger:
                         readable=now<row['request_expires_at'];status='PENDING' if readable else 'EXPIRED'
                 result={k:args[k] for k in ['task_id','request_id','request_sha256']}
                 result.update(status=status,persisted=bool(row),grant_id=self.policy.grant_id,
-                    policy_sha256=self.policy.sha256(),automatic_retry=False,identity_verified=False)
+                    policy_sha256=self.policy.sha256(),automatic_retry=False,identity_verified=False,
+                    grant_state=self._grant_state(state,now))
                 if write:result['duplicate']=duplicate
                 if row:
                     result['request_expires_at']=row['request_expires_at']
@@ -204,6 +237,8 @@ class GrantLedger:
                             raise GrantError('ANSWER_CONTENT_CONFLICT')
                         result['answer']=row['answer']
                 if write:
+                    current=self._now();self._active(state,current)
+                    if current>=row['request_expires_at']:raise GrantError('REQUEST_EXPIRED')
                     db.execute('INSERT INTO audit VALUES(?,?,?,?,?,?)',(now,self.policy.grant_id,args['request_id'],
                         'register_duplicate' if name==TOOLS[0] and duplicate else 'register' if name==TOOLS[0] else
                         'answer_duplicate' if duplicate else 'answer',args['request_sha256'],row['answer_sha256']))
@@ -225,6 +260,22 @@ class GrantLedger:
                 return {'status':'REVOKED','grant_id':self.policy.grant_id,'automatic_retry':False}
         except MailboxError:raise
         except (OSError,sqlite3.Error):raise GrantError('GRANT_WRITE_UNKNOWN','UNKNOWN') from None
+
+    def status(self):
+        """Owner reconciliation view, including durable cancellation; never includes bodies."""
+        try:
+            with self._db() as db:
+                state=self._state(db);now=self._now()
+                total=db.execute('SELECT count(*) FROM messages WHERE grant_id=?',(self.policy.grant_id,)).fetchone()[0]
+                pending=db.execute('SELECT count(*) FROM messages WHERE grant_id=? AND answer IS NULL AND request_expires_at>?',
+                    (self.policy.grant_id,now)).fetchone()[0]
+                return {'status':self._grant_state(state,now),'grant_id':self.policy.grant_id,
+                    'task_id':self.policy.task_id,'policy_sha256':self.policy.sha256(),
+                    'total_requests':total,'pending_requests':pending,'max_requests':self.policy.max_requests,
+                    'max_pending':self.policy.max_pending,'not_before':self.policy.not_before,
+                    'expires_at':self.policy.expires_at,'automatic_retry':False}
+        except MailboxError:raise
+        except (OSError,sqlite3.Error):raise GrantError('GRANT_READ_UNKNOWN','UNKNOWN') from None
 
     def audit_metadata(self):
         """Logical 30-day view; no physical deletion and no body or external diagnostics."""

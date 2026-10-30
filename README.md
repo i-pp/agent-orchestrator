@@ -455,4 +455,4 @@ preflightは既存stateとの参照・flag継承、キーmetadata、binary/helpe
 
 共通指示は[i-pp/ai-orchestration](https://github.com/i-pp/ai-orchestration)のcommit/hashで固定し、既存local checkoutのGit内容から読む。~と相対pathの解決、HEAD/dirtyの記録、旧v1.0の履歴保全と優先順位は[共通policy読込み](docs/common-policy.md)を参照。正本repoへのpull/resetや本文の重複管理はしない。
 
-固定slot毎の追加を避ける[限定grant案](docs/mailbox-grants.md)もコード/fixture試験まで準備した。現用MCPには接続しておらず既定OFF。公開11操作・live固定1slotは変わらない。
+固定slot毎の追加を避ける[限定grant](docs/mailbox-grants.md)をadapter・サービス・operator CLIへ接続した。flagは既定OFFで、別途承認した7日/32件/同時8件/各4KiBのworkstreamのみを有効化する。公開11操作・既存固定slotを維持し、取消とgrantだけのrollbackを用意する。実際の有効期間・残件数はprivate runtimeのpolicy/ledgerと有効化記録で確認する。Chatの自動起動・物理削除は含まない。

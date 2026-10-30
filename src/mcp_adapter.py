@@ -171,10 +171,18 @@ def tool_definitions(writes=False, local_llm=False, local_models=False, chat_mai
 
 
 class Adapter:
-    def __init__(self, root, allow_writes=False, allow_local_llm=False, allow_local_models=False, allow_chat_mailbox=False):
+    def __init__(self, root, allow_writes=False, allow_local_llm=False, allow_local_models=False, allow_chat_mailbox=False, allow_mailbox_grants=False):
         self.root = runtime_path(root)
         self.tools = tool_definitions(allow_writes, allow_local_llm, allow_local_models, allow_chat_mailbox)
         self.mailbox = Mailbox(self.root) if allow_chat_mailbox else None
+        self.grant = None
+        if allow_mailbox_grants:
+            if not allow_chat_mailbox:raise ValueError('Mailbox grants require the existing mailbox tools')
+            from mailbox_grants import load_runtime_grant,GrantLedger
+            policy=load_runtime_grant(self.root)
+            if any(task==policy.task_id for task,_ in self.mailbox.allowed):
+                raise ValueError('Grant task namespace conflicts with a fixed mailbox task')
+            self.grant=GrantLedger(self.root,policy,enabled=True)
         self.helper_root = None
         if allow_local_llm or allow_local_models:
             path = self.root/'local-llm.json'
@@ -285,11 +293,12 @@ class Adapter:
         try:
             if name in MAILBOX_TOOLS:
                 try:
-                    data = self.mailbox.dispatch(name, arguments)
+                    backend=(self.grant if self.grant is not None and arguments['task_id']==self.grant.policy.task_id else self.mailbox)
+                    data = backend.dispatch(name, arguments)
                     failed = False
                 except MailboxError as exc:
                     data, failed = exc.result(), True
-                metadata={k:data[k] for k in ['status','code','answer_sha256','duplicate'] if k in data}
+                metadata={k:data[k] for k in ['status','code','answer_sha256','duplicate','grant_id','grant_state'] if k in data}
                 self.record('end', outcome='error_or_uncertain' if failed else 'returned',
                             mailbox=metadata, **facts)
                 content = {'call_id': call_id, 'data': data}
@@ -516,9 +525,11 @@ def main():
                         help='Approved fixed-profile HTTP selection/lifecycle; never Docker or commands')
     parser.add_argument('--allow-chat-mailbox', action='store_true',
                         help='Separately approved fixed-slot non-secret mailbox; default off')
+    parser.add_argument('--allow-mailbox-grants',action='store_true',
+                        help='Explicit finite workstream grant; requires mailbox and private grant policy, default off')
     args = parser.parse_args()
     os.umask(0o077)
-    try: return serve(Adapter(args.runtime, args.allow_writes, args.allow_local_llm, args.allow_local_models, args.allow_chat_mailbox))
+    try: return serve(Adapter(args.runtime, args.allow_writes, args.allow_local_llm, args.allow_local_models, args.allow_chat_mailbox, args.allow_mailbox_grants))
     except (OSError, ValueError, TypeError, sqlite3.Error):
         print('Adapter startup refused: verify private runtime and operator policy.', file=sys.stderr)
         return 1

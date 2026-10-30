@@ -1,7 +1,6 @@
 {
+  "schema_version": 1,
   "enabled": false,
-  "approval_required": true,
-  "integration_status": "PREPARED_NOT_CONNECTED",
   "policy": {
     "schema_version": 1,
     "grant_id": "d6cac07c-5dda-5cd9-acc5-a3e6494ebb31",

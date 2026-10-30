@@ -1,51 +1,60 @@
-# 限定workstream grantの承認案（未接続・既定OFF）
+# 期限と件数を限定した開発相談grant
 
-固定slotを1件ずつ追加する代わりに、期限と件数を限定したworkstreamを一度承認し、その範囲内で要求を初回登録時にpinする案。実装は`src/mailbox_grants.py`の独立ledgerとオフライン検査まで。既存MCP adapter、service flag、現用policy、既存DBへ接続していない。現在の11操作・live固定1slotは変わらない。
+固定slotの追加を繰り返す代わりに、一度承認したtask UUID内で要求を初回登録時にpinする。`--allow-mailbox-grants`は既定OFF、既存の`--allow-chat-mailbox`も必要。公開操作名・schemaは既存11操作と同じ。固定slotは従来のpolicy/DBで維持し、grantだけを別ledgerで扱う。task namespaceの衝突は起動前に拒否する。
 
-## 一度に確認する最小範囲
+## 承認された範囲と実際の有効期間
 
-`examples/mailbox-grant.example.json`は`enabled=false`の候補。policy属性だけがvalidatorへの入力であり、このJSONを置いても公開・有効化されない。例の開始・終了は2026-10-30 00:00 UTC〜2026-11-06 00:00 UTC。承認時に実際の期間とpolicy hashを再確認する。期限を暗黙に延長しない。
+2026-10-30 04:34 UTCに確認された承認は、7日間・合計32件・同時PENDING最大8件、依頼と回答各4096 UTF-8 bytes、要求期限24時間、回答返却7日、監査表示30日。検証用の新規要求も合計32件に含める。実際の開始・終了・policy hashは有効化記録とruntimeの`chat-mailbox-grant.json`に固定し、サービス再起動や再送では延長しない。exampleの時刻は有効化記録ではない。
 
-| 項目 | 制約 |
+| 項目 | 強制する境界 |
 |---|---|
-| 対象 | 1個の固定task UUIDで表すagent-orchestrator開発相談workstream |
-| 目的 | 非機密の設計確認・差分レビュー・テスト結果の相談。ラベルは意味上の分類で、内容分類の自動強制ではない |
-| 新要求 | UUIDのrequest_idとSHA-256を初回登録でimmutable pin。以後同じ要求を上書きしない |
-| grant期限 | 最大7日。指定not_before以上/expires_at未満だけwrite可能 |
-| 要求期限 | 初回から最大24時間、grant終了までの早い方。再送でも延長しない |
-| 件数 | grantあたり合計32要求、同時PENDING最大8。期限切れも合計件数から除去しない |
-| 本文・回答 | 各4096 UTF-8 bytes以下。空白だけ・不正Unicode・hash不一致を拒否 |
-| 本文取得 | PENDINGの要求本文は要求期限まで。ANSWERED後は要求本文・回答とも正常回答保存から最大7日。grant終了後も残り、全体ではgrant開始から最長14日となり得る。取消時は両本文を即座に非返却 |
-| 監査 | write/revokeの時刻・ID・hash・固定eventだけ。表示期間最大30日。本文・外部例外の全文は記録しない |
-| 格納上限 | 別のprivate SQLite ledger最大1MiB。rollback journal等とディスク全体quotaは別 |
-| 自動処理 | 自動Chat起動・モデル起動・write再送・任意ファイル/URL/shell/タスク実行なし |
+| 対象 | 1個のtask UUID、purpose=`agent-orchestrator-development` |
+| 内容 | 非機密の開発相談という運用上の範囲。自動secret分類・著者本人認証ではない |
+| 初回登録 | request UUIDと要求SHA-256をimmutable pin。hash/本文競合を拒否 |
+| grant期間 | not_before以上、expires_at未満だけ登録・回答保存可。最大7日 |
+| 要求期限 | 初回登録＋24時間とgrant終了の早い方。期限後は同内容のwrite再送も拒否 |
+| 予算 | 総数32、未回答かつ期限内8。回答でpending枠のみ解放。期限切れ・取消・再接続で総数を減らさない |
+| 本文 | 各4096 UTF-8 bytes以下。不正Unicode・空白のみ・hash不一致を拒否 |
+| PENDING読取り | 要求期限までは要求本文、以降はEXPIRED metadataのみ |
+| ANSWERED読取り | 回答保存から7日未満は要求と回答を返却。grant期限後もこの期間内は読取り可能 |
+| 取消 | 永続REVOKED。登録・回答保存禁止、既存/未登録とも本文を返さずmetadataのみ |
+| 監査 | ID・hash・時刻・固定event。30日分のlogical view。MCP到達監査にも本文を記録しない |
+| 容量 | private SQLite ledger最大1MiB。journalやディスク全体quotaは別 |
 
-同じMCP認証scopeのclientには、このworkstream内の新規要求登録・要求取得・回答保存・回答取得を許すことになる。質問ごとの事前hash指定を不要にする変更であり、現行1slotからの明確な公開対象拡大。ID/hashはChat本人や著者・品質の証明ではない。非機密制約は運用上の前提で、自動secret検出や役割別本人認証の保証ではない。
+期限切れgrantの新しいIDはNOT_FOUNDとgrant_state=EXPIREDを返す。これを新規登録可能とは扱わない。要求/回答の返却期限切れはEXPIRED、取消はREVOKED。読取りの保存有無・grant状態・hashと本文の有無を分けて扱う。clientはterminal状態になったとき、先行する読取りの本文も出力しない。
 
-## ledgerで準備済みの強制
+## 起動・再接続
 
-GrantPolicyは未知field、別purpose、UUID不正、上限超過を拒否する。同じgrant_idのpolicy hash変更も拒否し、再オープンで期限・取消をリセットしない。新grant_idは新たな承認対象であり、clientやtimeout処理が勝手に発行しない。
+runtimeの固定ファイル`chat-mailbox-grant.json`は所有者0600、runtimeは0700。正確な4 field（schema_version/enabled/policy/policy_sha256）だけを受理する。任意pathをMCP引数に渡す経路はない。`GrantPolicy`は未知属性・別purpose・型・UUID・上限を検査する。同じgrant_idのpolicy hash変更は既存ledgerで拒否する。
 
-SQLite `BEGIN IMMEDIATE`内でpending/totalを調べて登録する。並行書込みでも上限と初回hash pinに勝者は1件だけ。同一内容再送は予算を増やさず冪等、別内容を拒否する。最初の回答だけを保存し、同一回答の再送は延長・上書きしない。
+preflightは全起動引数・既存キー参照・policyを停止前に照合し、ledgerを作成しない。再開は保存済みflagとキー参照を継承する。期限切れでもretained answerを取得できるよう再接続は可能。新規writeの可否は各transaction内で再検査する。
 
-ACK喪失はUNKNOWNを返す。get_request/get_answerで既存ID/hashを照合し、再送や別ID作成を自動実行しない。commit前失敗なら保存なし、commit後の応答喪失ならgetterで保存状態を確認できる。SQLite障害や不正な本文/hash/期限metadataを成功と扱わない。
+SQLiteのBEGIN IMMEDIATE取得後に時刻とpending/totalを確認し、commit直前にも期限を確認する。競合書込みでも上限・初回hash・回答の不変性を守る。ACK喪失はUNKNOWN。既存ID/hashによるgetterだけで照合し、自動write再送や別ID発行をしない。
 
-## 取消とrollback
+## オペレータCLI
 
-`GrantLedger.revoke()`は準備されたoperator操作であり、MCP toolではない。取消は永続・冪等で、新規登録と回答保存を停止する。getはREVOKEDと保存有無/hash等のmetadataのみを返し、本文を返さない。取消を戻す機能はなく、再許可は別grantの具体的承認が必要。
+シェル例はrepo rootで実行する。`RUNTIME`を対象の既存private runtimeに、`GRANT_ID`と`POLICY_SHA256`を有効化記録に合わせて設定する。秘密の値を入れない。`mailbox_ops.py`はJSONをstdinから受け取り、既定で本文をstdoutへ出さない。
 
-runtimeへの将来統合は別の既定OFF切替で行い、承認前に導入しない。rollbackではgrant経路を無効にして現行の固定slotだけへ戻す。元のpolicy/回答を削除・上書きせず、grant ledgerはprivateに保全する。public側にgrant操作や任意コマンドを増やす案ではない。
+```bash
+python3 -B scripts/mailbox_ops.py prepare --runtime "$RUNTIME" < nonsecret-draft.json
+python3 -B scripts/mailbox_ops.py register --runtime "$RUNTIME" < nonsecret-request-bundle.json
+python3 -B scripts/mailbox_ops.py inspect --runtime "$RUNTIME" < request-key.json
+python3 -B scripts/mailbox_grant_admin.py status --runtime "$RUNTIME" --grant-id "$GRANT_ID" --policy-sha256 "$POLICY_SHA256"
+python3 -B scripts/mailbox_grant_admin.py revoke --runtime "$RUNTIME" --grant-id "$GRANT_ID" --policy-sha256 "$POLICY_SHA256" --apply
+```
 
-## 保持の正確な限界
+prepareは候補を組み立てるだけでpolicyやledgerを作成せず、取消状態を含むwrite許可の確認にはならない。status/revokeは既存ledgerのみを開き、存在しないDBを作成しない。revokeは明示`--apply`が必要。同一grant ID/hashを確認して不可逆に取消し、取消後のstatusで照合する。不確実なrevokeを自動再送しない。公開MCPに取消や管理コマンドを追加しない。
 
-7日は「回答を返せる期間」、30日は「監査metadataの表示期間」をコードで制限する。今回のmoduleは物理削除・VACUUM・backup削除・自動pruneを実装していない。期限後のbytesはprivate DBに残る。保持期間の経過だけで消去されたと報告しない。
+## Rollback
 
-実運用前に、承認者はこの論理保持を採用するか、物理削除と保全の別手順を要求するかを決める。hard deletion期限が必須なら、削除・backup・復旧不能性を別途具体化し、検証してから有効化する。上限到達時は新規書込みを拒否し、容量を勝手に拡大したり、旧IDを削除して再利用したりしない。
+```bash
+python3 -B scripts/poc_services.py grant-rollback-plan --runtime "$RUNTIME"
+```
 
-read操作の全到達履歴は将来の既存MCP audit層で記録する必要がある。この独立ledgerだけでは未到達・認証失敗・不正JSON等を観測できない。未知callのabsenceをChatが使えなかった証明にしない。
+出力された停止前検査・stop・start・status手順でgrant flagだけを外す。既存11操作・固定slot・認証・公開範囲を保全し、grant ledger/configはprivateに残す。復帰時は同じgrant/policy/hashを使用し、総数や期限をリセットしない。`rollback-plan`はmailbox全体を外して旧7操作へ戻す別手順。どちらもplanだけではサービスを変更しない。稼働/UNKNOWNの仕事があれば停止しない。
 
-## 現段階の検証と残る作業
+## 保持と実証の限界
 
-17検査で、既定OFF、policy/型/上限、scopeと未知field、動的初回pin、冪等・競合、pending/total予算、並行登録、期限、回答返却期間、永続取消、ACK喪失/rollback、Unicode/サイズ、改ざん、metadata監査、11既存tool不変を確認した。専用一時SQLiteのみ、namespace・モデル・サービス・API通信は0。
+7日は本文の返却期間、30日はledger監査metadataの表示期間。物理削除・VACUUM・backup削除・自動pruneは実装しない。期限後もprivate DBにbytesが残る。MCP adapterの既存到達監査ファイルは別の容量制限を持ち、自動30日削除ではない。
 
-既存adapter/serviceとの接続、取消操作のoperator経路、metadata-only状態を既存clientが正しく扱うこと、実Chat往復、物理保持の運用は未実装/未検証。承認案の対象と未接続の準備コードを区別し、現行の11操作がこのgrantで既に動くとは扱わない。
+同じ認証scopeのclientが対象workstreamで依頼/回答を読み書きする。ID/hashは会話本人や回答品質の証明ではない。この機能はChatを起動せず、任意ファイル/URL/shell/タスク・新キー・モデル起動を公開しない。ローカルMCP stdioでの実証、hosted schema/health確認、Dot直接呼出し、実Chat往復は別の証拠として報告する。

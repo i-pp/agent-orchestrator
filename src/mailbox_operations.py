@@ -59,6 +59,9 @@ class StdioMailbox:
                           ('chat_mailbox_enabled','--allow-chat-mailbox')]:
             if type(state.get(name)) is not bool:raise OperationError('INVALID_INVOCATION_STATE','BLOCKED')
             if state[name]:argv.append(flag)
+        grants=state.get('mailbox_grants_enabled',False)
+        if type(grants) is not bool:raise OperationError('INVALID_INVOCATION_STATE','BLOCKED')
+        if grants:argv.append('--allow-mailbox-grants')
         self.process=subprocess.Popen(argv,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
             env={'PATH':'/usr/bin:/bin','HOME':str(Path.home()),'LANG':'C.UTF-8'})
         os.set_blocking(self.process.stdin.fileno(),False)
@@ -134,6 +137,8 @@ class MailboxWorkflow:
     def __init__(self,factory):
         self.factory,self.connection=factory,None
         self.calls=[];self.write_attempts=0;self.reconnections=0
+        self.policy_identity=None;self.last_grant_state=None;self.last_status=None
+        self.last_persisted=False;self.last_answer_hash=None
 
     def close(self):
         if self.connection:self.connection.close();self.connection=None
@@ -151,25 +156,71 @@ class MailboxWorkflow:
             item['call_id']=envelope['call_id'];data=envelope['data']
             for key in ['task_id','request_id','request_sha256']:
                 if data.get(key)!=args[key]:raise OperationError('MCP_SLOT_MISMATCH')
-            if data.get('status') not in ['NOT_FOUND','PENDING','ANSWERED']:
+            if data.get('status') not in ['NOT_FOUND','PENDING','ANSWERED','EXPIRED','REVOKED']:
                 raise OperationError('MCP_INVALID_STATE')
             if (data.get('identity_verified') is not False or data.get('automatic_retry') is not False
                     or not isinstance(data.get('policy_sha256'),str)
                     or not re.fullmatch(HASH_PATTERN,data['policy_sha256'])):
                 raise OperationError('MCP_INVALID_STATE')
-            if data.get('persisted') is not (data['status']!='NOT_FOUND'):
+            grant='grant_id' in data or 'grant_state' in data
+            terminal=data['status'] in ['EXPIRED','REVOKED']
+            if grant:
+                if (not isinstance(data.get('grant_id'),str) or not re.fullmatch(ID_PATTERN,data['grant_id'])
+                        or data.get('grant_state') not in ['ACTIVE','NOT_YET_ACTIVE','EXPIRED','REVOKED']
+                        or type(data.get('persisted')) is not bool
+                        or (data['status']=='REVOKED') != (data['grant_state']=='REVOKED')
+                        or (data['status']=='NOT_FOUND' and data['persisted'])
+                        or (data['status'] in ['PENDING','ANSWERED','EXPIRED'] and not data['persisted'])
+                        or (data['status']=='PENDING' and data['grant_state']!='ACTIVE')
+                        or (data['status'] in ['ANSWERED','EXPIRED'] and data['grant_state']=='NOT_YET_ACTIVE')):
+                    raise OperationError('MCP_INVALID_STATE')
+                if data['persisted']:
+                    if (type(data.get('request_expires_at')) is not int or data['request_expires_at']<=0
+                            or type(data.get('answer_saved')) is not bool
+                            or ('answer_sha256' in data) is not data['answer_saved']
+                            or (data['status']=='ANSWERED' and not data['answer_saved'])
+                            or (data['status']=='PENDING' and data['answer_saved'])):
+                        raise OperationError('MCP_INVALID_STATE')
+                elif any(k in data for k in ['request_expires_at','answer_saved','answer_sha256']):
+                    raise OperationError('MCP_INVALID_STATE')
+            elif terminal or any(k in data for k in ['request_expires_at','answer_saved']):
                 raise OperationError('MCP_INVALID_STATE')
-            if ((data['status']!='ANSWERED' and any(k in data for k in ['answer','answer_sha256']))
+            elif data.get('persisted') is not (data['status']!='NOT_FOUND'):
+                raise OperationError('MCP_INVALID_STATE')
+            if ('answer_sha256' in data and (not isinstance(data['answer_sha256'],str)
+                    or not re.fullmatch(HASH_PATTERN,data['answer_sha256']))):
+                raise OperationError('MCP_INVALID_CONTENT_STATE')
+            if ((terminal and any(k in data for k in ['request','answer']))
+                    or (data['status']!='ANSWERED' and ('answer' in data or ('answer_sha256' in data and not terminal)))
                     or (name!=TOOLS[3] and 'answer' in data)
                     or ('request' in data and (name!=TOOLS[1] or data['status']=='NOT_FOUND'))):
                 raise OperationError('MCP_INVALID_CONTENT_STATE')
-            if name==TOOLS[1] and data['status']!='NOT_FOUND':
+            if name==TOOLS[1] and data['status'] in ['PENDING','ANSWERED']:
                 validate_arguments(TOOLS[0],{**args,'request':data.get('request')})
             if name==TOOLS[3] and data['status']=='ANSWERED':
                 validate_arguments(TOOLS[2],{k:args[k] for k in ['task_id','request_id','request_sha256']} |
                                    {'answer':data.get('answer'),'answer_sha256':data.get('answer_sha256')})
                 if args.get('expected_answer_sha256') and data['answer_sha256']!=args['expected_answer_sha256']:
                     raise OperationError('ANSWER_CONTENT_CONFLICT','BLOCKED')
+            identity=(data['policy_sha256'],data.get('grant_id'))
+            if self.policy_identity is not None and identity!=self.policy_identity:
+                raise OperationError('MCP_POLICY_MISMATCH')
+            if grant and self.last_grant_state is not None:
+                order={'NOT_YET_ACTIVE':0,'ACTIVE':1,'EXPIRED':2,'REVOKED':3}
+                if order[data['grant_state']]<order[self.last_grant_state]:
+                    raise OperationError('MCP_STATE_INCONSISTENT')
+            if self.last_status is not None:
+                allowed={'NOT_FOUND':{'NOT_FOUND','PENDING','ANSWERED','EXPIRED','REVOKED'},
+                         'PENDING':{'PENDING','ANSWERED','EXPIRED','REVOKED'},
+                         'ANSWERED':{'ANSWERED','EXPIRED','REVOKED'},
+                         'EXPIRED':{'EXPIRED','REVOKED'},'REVOKED':{'REVOKED'}}
+                if data['status'] not in allowed[self.last_status]:raise OperationError('MCP_STATE_INCONSISTENT')
+            if (self.last_persisted and not data['persisted']) or (self.last_answer_hash is not None
+                    and data.get('answer_sha256')!=self.last_answer_hash):
+                raise OperationError('MCP_STATE_INCONSISTENT')
+            self.policy_identity=identity;self.last_status=data['status']
+            self.last_grant_state=data.get('grant_state')
+            self.last_persisted=data['persisted'];self.last_answer_hash=data.get('answer_sha256')
             item['status']=data['status'];return data
         except MailboxError as exc:
             item.update(status='UNKNOWN',code='MCP_INVALID_CONTENT')
@@ -186,15 +237,33 @@ class MailboxWorkflow:
                 'reconnections':self.reconnections,'transport':'local MCP stdio',
                 'dot_direct_call_verified':False,'calls':self.calls,**extra}
 
+    @staticmethod
+    def _metadata(data):
+        return {k:data[k] for k in ['grant_id','grant_state','policy_sha256',
+                'request_expires_at','answer_saved','answer_sha256'] if k in data}
+
+    def _registered(self,data,bundle,**extra):
+        key={k:bundle[k] for k in ['task_id','request_id','request_sha256']}
+        if not data['persisted']:
+            return self._receipt('UNKNOWN',code='WRITE_NOT_YET_RECONCILED',**key)
+        if data['status'] not in ['EXPIRED','REVOKED'] and data['request']!=bundle['request']:
+            raise OperationError('REQUEST_CONTENT_CONFLICT','BLOCKED')
+        return self._receipt(data['status'],persisted=True,**extra,**self._metadata(data),**key)
+
     def register(self,bundle):
         validate_arguments(TOOLS[0],bundle)
         key={k:bundle[k] for k in ['task_id','request_id','request_sha256']}
         uncertain_write=False
         try:
             existing=self._call(TOOLS[1],key)
+            inactive=existing.get('grant_state') in ['NOT_YET_ACTIVE','EXPIRED','REVOKED']
+            if existing['status'] in ['EXPIRED','REVOKED'] or (existing['status']=='NOT_FOUND' and inactive):
+                code={'NOT_YET_ACTIVE':'GRANT_NOT_YET_ACTIVE','EXPIRED':'GRANT_EXPIRED',
+                      'REVOKED':'GRANT_REVOKED'}.get(existing.get('grant_state'),'REQUEST_EXPIRED')
+                return self._receipt('BLOCKED',code=code,observed_status=existing['status'],
+                    persisted=existing['persisted'],**self._metadata(existing),**key)
             if existing['status']!='NOT_FOUND':
-                if existing['request']!=bundle['request']:raise OperationError('REQUEST_CONTENT_CONFLICT','BLOCKED')
-                return self._receipt(existing['status'],persisted=True,reused_existing=True,**key)
+                return self._registered(existing,bundle,reused_existing=True)
             self.write_attempts=1
             try:self._call(TOOLS[0],bundle)
             except OperationError as exc:
@@ -203,14 +272,10 @@ class MailboxWorkflow:
                 self.close();self.reconnections+=1
                 # Reconnect for a getter only. A missing row cannot prove that a timed-out write will not commit later.
                 reconciled=self._call(TOOLS[1],key)
-                if reconciled['status']=='NOT_FOUND':return self._receipt('UNKNOWN',code='WRITE_NOT_YET_RECONCILED',**key)
-                if reconciled['request']!=bundle['request']:raise OperationError('REQUEST_CONTENT_CONFLICT','BLOCKED')
-                return self._receipt(reconciled['status'],persisted=True,reconciled=True,**key)
+                return self._registered(reconciled,bundle,reconciled=True)
             uncertain_write=True  # A later getter failure must not erase the known write attempt.
             confirmed=self._call(TOOLS[1],key)
-            if confirmed['status']=='NOT_FOUND':return self._receipt('UNKNOWN',code='WRITE_NOT_YET_RECONCILED',**key)
-            if confirmed['request']!=bundle['request']:raise OperationError('REQUEST_CONTENT_CONFLICT','BLOCKED')
-            return self._receipt(confirmed['status'],persisted=True,reused_existing=False,**key)
+            return self._registered(confirmed,bundle,reused_existing=False)
         except OperationError as exc:return self._receipt('UNKNOWN' if uncertain_write else exc.status,code=exc.code,**key)
         finally:self.close()
 
@@ -224,18 +289,21 @@ class MailboxWorkflow:
                     answer=self._call(TOOLS[3],key)
                     if question['status']=='NOT_FOUND' and answer['status']!='NOT_FOUND':
                         question=self._call(TOOLS[1],request_key)
+                        if question['status'] in ['EXPIRED','REVOKED']:
+                            answer=question
                     if answer['status']=='NOT_FOUND' and question['status']!='NOT_FOUND':
                         raise OperationError('MCP_STATE_INCONSISTENT')
-                    if question['status']=='ANSWERED' and (answer['status']!='ANSWERED'
+                    if question['status']=='ANSWERED' and answer['status'] not in ['EXPIRED','REVOKED'] and (answer['status']!='ANSWERED'
                             or question.get('answer_sha256')!=answer.get('answer_sha256')):
                         raise OperationError('MCP_STATE_INCONSISTENT')
-                    result=self._receipt(answer['status'],persisted=answer['persisted'],**request_key)
+                    result=self._receipt(answer['status'],persisted=answer['persisted'],**self._metadata(answer),**request_key)
+                    if answer['status'] in ['EXPIRED','REVOKED']:return result
                     if question['status']!='NOT_FOUND':result['request']=question['request']
                     if answer['status']=='ANSWERED':
                         result['answer']=answer['answer'];result['answer_sha256']=answer['answer_sha256']
                     return result
                 except OperationError as exc:
-                    if attempt or exc.status=='BLOCKED':raise
+                    if attempt or exc.status=='BLOCKED' or exc.code in ['MCP_POLICY_MISMATCH','MCP_STATE_INCONSISTENT']:raise
                     self.close();self.reconnections+=1  # Read-only reconnect at most once.
         except OperationError as exc:return self._receipt(exc.status,code=exc.code,**request_key)
         finally:self.close()
