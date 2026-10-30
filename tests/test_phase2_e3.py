@@ -52,7 +52,7 @@ class ReadinessTests(unittest.TestCase):
     def test_health_requires_poll_and_does_not_pass_key_environment(self):
         with tempfile.TemporaryDirectory(dir=PROJECT/'.runtime', prefix='e3-health-') as temp:
             path=Path(temp)/'url';path.write_text('http://127.0.0.1:1');path.chmod(0o600)
-            value={'result':'ok','healthz':{'ok':True},'readyz':{'ok':True},'control_plane_poll':{'ok':True}}
+            value={'result':'ok','healthz':{'ok':True},'readyz':{'ok':True},'control_plane_poll':{'ok':True,'value':time.time()}}
             with patch('service_wait.subprocess.run') as run:
                 run.return_value.returncode=0;run.return_value.stdout=json.dumps(value)
                 self.assertTrue(tunnel_ready(CLIENT,path))

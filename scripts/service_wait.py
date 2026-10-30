@@ -17,6 +17,10 @@ sys.path.insert(0, str(PROJECT / 'src'))
 from control_socket import request
 from transport import proc_identity
 
+# Observed poll deadline 35s + maximum backoff 10s; tolerate two cycles.
+# This is a readiness decision, never an automatic restart trigger.
+MAX_POLL_AGE_SECONDS = 90
+
 
 def daemon_ready(root, unit=None, timeout=1, *, manager_env=None):
     raw = Path(root).expanduser().absolute()
@@ -65,9 +69,17 @@ def tunnel_ready(client, url_file, timeout=2):
         '--require-control-plane-poll', '--json'], env=env, capture_output=True, text=True, timeout=timeout)
     if result.returncode != 0: return False
     value = json.loads(result.stdout)
-    return (value.get('result') == 'ok' and value.get('healthz', {}).get('ok') is True
-            and value.get('readyz', {}).get('ok') is True
-            and value.get('control_plane_poll', {}).get('ok') is True)
+    if not isinstance(value, dict) or value.get('result') != 'ok': return False
+    if any(not isinstance(value.get(key), dict) or value[key].get('ok') is not True
+           for key in ['healthz', 'readyz', 'control_plane_poll']): return False
+    timestamp = value['control_plane_poll'].get('value')
+    now = time.time()
+    try:
+        if (type(timestamp) not in [int, float] or not math.isfinite(timestamp) or timestamp <= 0
+                or type(now) not in [int, float] or not math.isfinite(now) or now <= 0): return False
+        return 0 <= now - timestamp <= MAX_POLL_AGE_SECONDS
+    except OverflowError:
+        return False
 
 
 def main():
