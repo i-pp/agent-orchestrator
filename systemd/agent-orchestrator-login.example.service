@@ -1,0 +1,23 @@
+# Render with scripts/poc_login.py render; this template is not installable as-is.
+# A persistent login entry; daemon and Tunnel remain the existing owned transient units.
+[Unit]
+Description=Restore approved Agent Orchestrator MCP services after login
+After=basic.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/env -i PATH=/usr/bin:/bin "HOME=@HOME_EXEC@" LANG=C.UTF-8 /usr/bin/python3 -B "@SCRIPT_EXEC@" restore --runtime "@RUNTIME_EXEC@" --expected-invocation-sha256 @PIN@ --apply
+TimeoutStartSec=240
+TimeoutStopSec=10
+Restart=no
+KillMode=mixed
+UMask=0077
+LimitCORE=0
+StandardOutput=journal
+StandardError=journal
+# No ExecStop: disabling/stopping this entry does not stop an active GPU/client job.
+# No linger, socket activation, new credentials, timer or automatic retry.
+
+[Install]
+WantedBy=default.target
