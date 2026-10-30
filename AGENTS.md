@@ -1,6 +1,6 @@
 # 共通ポリシーとproject固有の作業指示
 
-共通指示の唯一の正本は [`policies.md`](policies.md)。分割文書は索引であり、本文の代替ではない。開始時に次を実行し、検証済みの本文・version・SHA-256を実際に受け取ってからpolicy依存の作業へ適用する。
+共通指示の正本は [`i-pp/ai-orchestration`](https://github.com/i-pp/ai-orchestration) のdocs/ai/orchestration.md・docs/ai/policies.md・agents/README.md。`config/upstream-policy.json`でcommitと各hashを固定し、既存ローカルcheckoutの固定Git内容を読む。本文をこのrepoへ複製管理しない。旧 [`policies.md`](policies.md) v1.0はhash固定の履歴として保全し、現在の共通本文として二重注入しない。開始時に次を実行し、検証済みの本文・version・SHA-256を実際に受け取ってからpolicy依存の作業へ適用する。
 
 ```bash
 python3 -B scripts/policy_context.py --format inspect
@@ -12,7 +12,7 @@ python3 -B scripts/policy_context.py --format inspect
 
 ## Project固有の参照先と境界
 
-- 正本の場所と期待version/hash：`config/policy.json`。共通bundleの検証情報：`policies/manifest.json`。
+- 採用する共通版とhash：`config/upstream-policy.json`。`config/policy.json`が採用を必須化する。pathの相対基準はrepo root、~はuser homeへ展開。ローカル設定`config/policy-source.local.json`はGit除外し、読んだcommit/hash/dirtyを記録する。旧版の検証情報は`policies/manifest.json`。
 - 本文の送信経路と環境ごとの確認範囲：`docs/common-policy.md`。
 - nativeの同時子2枠：`.codex/config.toml`。各role：`.codex/agents/`。子は孫を作らない。
 - 既存runnerの時間・資源設定：`scheduler-config.json`、`resource-limits.json`。native作業の各子300秒/全体900秒、初回1回＋retry最大2回、および実装・検証・統合の手順：`docs/native-agent-team.md`。

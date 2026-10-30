@@ -26,6 +26,18 @@ class PolicyBundle(NamedTuple):
         return {'version': self.version, 'sha256': self.sha256, 'source': self.source}
 
 
+class SourcePolicyBundle(NamedTuple):
+    text: str
+    version: str
+    sha256: str
+    source: str
+    provenance_json: str
+
+    def metadata(self):
+        return {'version':self.version,'sha256':self.sha256,'source':self.source,
+                'upstream':json.loads(self.provenance_json)}
+
+
 _VERSION = re.compile(r'[0-9]+(?:\.[0-9]+)*\Z')
 _SHA256 = re.compile(r'[0-9a-f]{64}\Z')
 _TITLE = '# AI開発オーケストレーション統合指示 v'
@@ -82,7 +94,8 @@ def _json(path, keys):
                            parse_constant=invalid_constant)
     except json.JSONDecodeError as error:
         raise PolicyError('Invalid policy JSON: ' + str(path)) from error
-    if not isinstance(value, dict) or set(value) != set(keys):
+    valid = [set(k) for k in keys] if isinstance(keys,tuple) else [set(keys)]
+    if not isinstance(value, dict) or set(value) not in valid:
         raise PolicyError('Unexpected or missing policy fields: ' + str(path))
     if type(value['schema_version']) is not int or value['schema_version'] != 1:
         raise PolicyError('Unsupported policy schema: ' + str(path))
@@ -131,17 +144,28 @@ def load_policy(bundle_root, *, expected_version=None, expected_sha256=None):
 def load_project_policy(project_root):
     """Load the common bundle selected and pinned by a project's operator file."""
     root = _path(project_root, directory=True)
-    config = _json(root / 'config/policy.json',
-                   {'schema_version', 'bundle_root', 'expected_version', 'expected_sha256'})
+    fields={'schema_version','bundle_root','expected_version','expected_sha256'}
+    config = _json(root / 'config/policy.json',(fields,fields|{'upstream_pin'}))
     location = config['bundle_root']
     if not isinstance(location, str) or not location.strip() or Path(location).is_absolute():
         raise PolicyError('bundle_root must be a nonempty project-relative path')
-    return load_policy(root / location,
+    legacy=load_policy(root / location,
                        expected_version=_version(config['expected_version']),
                        expected_sha256=_sha256(config['expected_sha256']))
+    if 'upstream_pin' in config:
+        if config['upstream_pin']!='upstream-policy.json':raise PolicyError('Unexpected upstream pin path')
+        from upstream_policy import load_upstream
+        return load_upstream(root,legacy)
+    if (root/'config/upstream-policy.json').exists():
+        raise PolicyError('Upstream pin exists but project source selection is missing')
+    return legacy
 
 
 def _checked_bundle(bundle):
+    if isinstance(bundle,SourcePolicyBundle):
+        from upstream_policy import check_bundle
+        check_bundle(bundle)
+        return
     if not isinstance(bundle, PolicyBundle) or not isinstance(bundle.text, str):
         raise PolicyError('A loaded PolicyBundle is required')
     _version(bundle.version)
@@ -169,6 +193,7 @@ def developer_instructions(bundle, role_instructions=''):
         '共通ポリシーの検証済みスナップショットを以下に含む。\n'
         '適用順位: 実行環境の上位規則・権限・ユーザーの明示的制約が優先する。'
         'このポリシーは権限や承認を追加しない。'
+        '既存の安全ガード・追加隔離禁止・明示されたscope/認証/費用制限を上書きしない。'
         '共通ポリシーはその範囲内で適用し、ロール/実行の補足は本文を変更しない。\n'
         'Policy metadata: ' + metadata + '\n\n--- BEGIN COMMON POLICY ---\n')
     boundary = '' if bundle.text.endswith('\n') else '\n'

@@ -1,0 +1,20 @@
+{
+  "enabled": false,
+  "approval_required": true,
+  "integration_status": "PREPARED_NOT_CONNECTED",
+  "policy": {
+    "schema_version": 1,
+    "grant_id": "d6cac07c-5dda-5cd9-acc5-a3e6494ebb31",
+    "task_id": "ef28b268-b62a-5e30-8796-83681f872e35",
+    "purpose": "agent-orchestrator-development",
+    "not_before": 1793318400,
+    "expires_at": 1793923200,
+    "request_ttl_seconds": 86400,
+    "max_requests": 32,
+    "max_pending": 8,
+    "max_text_bytes": 4096,
+    "retain_seconds": 604800,
+    "audit_retention_seconds": 2592000
+  },
+  "policy_sha256": "7cd6e232a1b767a339690332e212009a9dc37b2ce7457aff5982bc29e72b0200"
+}

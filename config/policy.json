@@ -2,5 +2,6 @@
   "schema_version": 1,
   "bundle_root": ".",
   "expected_version": "1.0",
-  "expected_sha256": "8fede5f946fd944485e7095ea27cb4923fb97ebf466d1e4b355ad21a50a00286"
+  "expected_sha256": "8fede5f946fd944485e7095ea27cb4923fb97ebf466d1e4b355ad21a50a00286",
+  "upstream_pin": "upstream-policy.json"
 }

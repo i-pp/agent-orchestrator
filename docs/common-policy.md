@@ -1,60 +1,67 @@
-# 共通ポリシーの読込みと適用範囲
+# 共通正本の固定版ロード
 
-パスは[表記規約](path-conventions.md)の疑似パスです。シェル例は同ページの変数を設定してから使用します。原本ログは変更していません。
+共通正本は[i-pp/ai-orchestration](https://github.com/i-pp/ai-orchestration)。このrepoは実行・監視・タスク管理と、正本を読む仕組みを所有する。正本repoへ編集・pull/reset・自動同期を行わず、本文をこちらで複製管理しない。
 
-## 正本と共通/project分離
+## 採用版と取得元
 
-本文の唯一の正本はrepo rootの[`policies.md`](../policies.md)。ユーザーが提示した「AI開発オーケストレーション統合指示 v1.0」の最初のMarkdown code blockを、fenceを除きUTF-8/LF・末尾改行付きでそのまま保存した。
+- GitHub採用commit: `aeef6db1cc9680833277f76962044da0dae501b9`
+- version: `git:aeef6db1cc9680833277f76962044da0dae501b9`（原文に数値版がないためcommitを版とする）
+- 本文集合のSHA-256: `3a6e2876cb93f60a0261bce0488bd67ac93053d52fb8fe6fd6821fe9489d4efd`
+- 正本3文書: docs/ai/orchestration.md、docs/ai/policies.md、agents/README.md
 
-v1.0のSHA-256は`8fede5f946fd944485e7095ea27cb4923fb97ebf466d1e4b355ad21a50a00286`。`policies/manifest.json`は共通bundleのversion/hash、`config/policy.json`はprojectが採用するbundleと期待version/hashを指定する。後者はoperator管理の設定であり、task本文やMCPから変更する入口はない。pinの不一致を自動修復しない。
+`config/upstream-policy.json`が取得元・commit・文書ごとのSHA-256/Git blob SHAを固定し、`config/policy.json`が新正本の採用を必須化する。実行時にbranchの最新版を追わず、ネットワーク・fetch・clone・copyを追加しない。指定したローカルGit objectから全文を読み、各hashと本文集合hashを検証する。
 
-`policies/orchestration.md`、`decision-making.md`、`escalation.md`は章への索引のみ。AGENTS・role・Skillへ全文を複製しない。将来は共通bundleを`i-pp/ai-orchestration`等へ移し、project側の相対`bundle_root`とpinで採用できる。今回GitHub repo作成・公開・pushは行っていない。
+共通の版を変更するときは正本側での変更・commitを確認し、pinを意図的に更新して試験する。hashエラーを消すためだけの自動再hashや、不達時の旧版fallbackはしない。下記ローカル設定を作っても、中央のhash pinは解除されない。
 
-project固有のnative枠は`.codex/config.toml`、既存daemon/workerの資源・期限は`scheduler-config.json`と`resource-limits.json`が引き続き管理する。共通policy loaderはこれらを置換せず、DAGや費用制御が完成したとは扱わない。
+## ローカルcloneのpathとdirty
 
-## 本文を渡すコード経路
+portableな既定は`../ai-orchestration`で、**agent-orchestratorのproject root基準**。`~`は実行ユーザーのhomeへ展開し、環境変数の暗黙展開はしない。絶対pathもoperatorのローカル設定で指定できる。実在を検査し、symlinkやcheckoutのsubdirectoryは拒否する。
 
-1. `src/common_policy.py`がproject設定→manifest→正本の順に読み、schema、UTF-8、先頭version、SHA-256、期待pinを検証する。symlink・別ファイルへのmanifest誘導・壊れた入力・不一致を拒否する。
-2. 既存Runnerはserver/model dispatch前に読込み、`developerInstructions`へ正本全文を1回と既存の出力schema/role指示を組み立てる。thread/startとthread/resumeの両方を通す。childの隔離filesystemにrepoをmountする必要はない。
-3. 使用したsource/version/hashをexecutionの既存owner JSONとJSONLへ記録する。DB schema変更はない。実行が使うのは検証時のimmutable snapshotであり、後から編集されたファイルを同じ実行へ混ぜない。
-4. 読込み失敗はモデル開始前にFAILEDとする。再開元にpolicy記録があってversion/hashが違えば再開を拒否する。古い記録にpolicy情報がなければ`legacy-unpinned`を記録し、現在の検証済み本文を渡す。
+通常は正本と一致するoriginと、採用commitのGit objectを持つ既存cloneを使う。ローカルの配置例は存在を仮定しない。まずremote・HEAD・dirtyを読み取って確かめる。ユーザーの未commit変更をreset/pullで上書きしたり、別cloneを自動作成したりしない。
 
-優先順位は、実行環境の上位規則・権限・ユーザーの明示的制約が先、その範囲内で共通policy、project/roleの具体化、taskという説明を組立て側に置く。本文自体は変更しない。semanticな矛盾を自動判定・解決する機構ではなく、既存のsandbox/approval/schema検証も変更しない。
+既存の並行作業repoにoriginやGitHub commit objectがなくても、**operatorがローカルcommitを明示し、固定3文書の全bytesがGitHub pinと一致する場合だけ**、内容が等価なcarrierとして参照できる。originが確認できたと表示せず、canonical commit・実際の読込commit・HEAD・dirty・origin_verified=falseを別々に記録する。別repoの内容を信用してpinを更新する機能ではない。
 
-## Native AgentとSkill
+`config/policy-source.local.json`はGit除外する。必要なら[設定例](../examples/policy-source-checkout.example.json)を参考に、実在するpathと40桁commitを明示する。これは配置設定でありcredentialを含めない。
 
-repo AGENTSと4 role定義は、開始時に次を実行して返る**本文・version・hashを実際に読む**手順を指定する。
+```json
+{
+  "schema_version": 1,
+  "checkout": "../ai-orchestration",
+  "checkout_commit": "<40-hex-local-commit>"
+}
+```
+
+読込metadataにはcheckout、loaded_checkout_commit、checkout_head_before/after、checkout_dirty、checkout_origin_verified、local_commit_overrideが入る。本文は常に選択commitのGit objectであり、dirtyなworking tree本文は読まない。HEADが進んでもpinを自動採用しない。古いcommit objectがなくなれば読込み失敗になる。
+
+## 読込みと優先順位
 
 ```bash
 python3 -B scripts/policy_context.py --format inspect
-```
-
-`.agents/skills/common-policy/SKILL.md`も同じloaderへ接続する。リンクやSkillのdescriptionだけを見て本文読込み済みとしない。参照更新・Skill形式検証だけでは、native実行でSkillが選択・実行された証拠にならない。2026-10-29の具体的承認後、通常ユーザー状態のprompt-input検査は成功し、repo規約・禁止指示・Skillの記載を確認した。4 roleと子2枠は未読込みで、config/readは対象repo自身のtrust登録不足によるproject layer無効を返した。祖先<USER_HOME>の既存trustedは変更せず、新しいrepo trustを追加していない。
-
-## ChatGPT / Dot / local向けの明示的な受渡し
-
-CLIは通信せず、本文を含むpayloadを組み立てる。
-
-```bash
 python3 -B scripts/policy_context.py --format packet --target dot --task '目的と完了条件'
-python3 -B scripts/policy_context.py --format packet --target chatgpt --task '設計上の判断対象'
-python3 -B scripts/policy_context.py --format chat --task '補助解析の要求'
 ```
 
-packetには本文入りdeveloper_instructionsとsource/version/hashが入る。chat形式はsystemに本文、userにtaskを持つOpenAI Chat互換messages。`--expect-sha256`で呼出し側の期待値も照合でき、不一致時は本文をstdoutへ出さず失敗する。これらは接続・送信・受領確認を意味しない。
+`common_policy.load_project_policy`→固定source設定→`upstream_policy`→既存local Git object→hash検証→immutable bundleの順。本文はdeveloperInstructionsへ各文書1回だけ入れ、metadataをexecution ownerへ記録する。Runnerのthread/startとthread/resume、repo AGENTS/4role/Skillの読込み経路は同じCLI/loaderを使う。resume元のversion/hashが違うとモデル開始前に拒否する。
 
-| 経路 | 現在の確認範囲 |
+優先順位は、実行環境の上位規則・権限・ユーザーの明示的制約・既存安全ガードが先、その範囲で固定共通正本、project/roleの具体化、task。正本は権限や承認を追加せず、追加隔離禁止、公開scope、認証、費用制限、既存のJSON/schemaやsandbox検査を上書きしない。モデルの遵守をこの仕組みだけで保証しない。
+
+不達、commit/版/hash不一致、壊れたsource設定、symlink等はPolicyErrorとなり、policy依存のdispatchをモデル開始前に止める。診断用の読み取りや独立した安全な編集まで止める意味ではない。直接の上位指示はこの正本より優先する。packet組立ては自動配送や、親dotからの直接呼出し成功の証明ではない。
+
+## 旧v1.0との差分と扱い
+
+旧`policies.md`は利用者原文v1.0（SHA-256 `8fede5f946fd944485e7095ea27cb4923fb97ebf466d1e4b355ad21a50a00286`）を変更せず、manifestとともに履歴として残す。採用設定は旧hashも検査するが、現在の共通本文として二重注入しない。二つの正本を並行改訂しない。
+
+意味のある差は次のとおり。
+
+| 差 | 今回の扱い |
 |---|---|
-| 既存Runner→App Server→Codex | 実Runnerと模擬peerで本文/既存role/metadataの送信・失敗前停止・resumeを検証。実モデル/稼働daemonの新turnは未実施 |
-| nativeのOrchestrator/4 roles | Agent定義からの本文組立てを検証。通常prompt-input/config/readは実行済み。対象repoのproject layerがtrust不足で無効となり、4 role/子2枠は未読込み。新規trust追加・実動は保留 |
-| repo Skill | 形式・参照・loader実行と通常native初期prompt内のSkill記載を確認。モデルによる自動選択・実行は未確認 |
-| ChatGPT / Dot | 本文入りpacketの組立てとpin検査を検証。新packetの自動配送・自動読込みは未接続。既存の委譲通知と混同しない |
-| local LLM | Chat互換messagesの組立てを検証。30Bへの送信・モデルの遵守は未確認、現用server不変更 |
+| 共通統治とruntime実装の管理repoを明確に分離 | 共通本文は正本へ集約し、こちらは読込と実行検証を所有 |
+| 旧S0〜S3に対し新正本はRoutine/Controlled/High impactの3区分 | publication/production/credential/privacy/費用等の重大影響は具体的なユーザー承認が必要。既に得た承認を再要求しない |
+| ChatGPT/Dot/各Agentの役割は追加権限を与えないと明示 | 設計回答や委譲を承認と混同しない |
+| 旧版のDAG/最大2並列/再試行上限/決議status/評価指標等の詳細は新正本に数値定義なし | 既存project設定・ガード・運用制約を維持し、上限を外さない。今回それらを新たに完成したと主張しない |
+| 新版は数値versionがなく内容も要約された別文書集合 | v2等を捏造せずcommitと各hashで固定 |
 
-共通本文の受渡しを実装したことと、受取側モデルの遵守や全経路の自動連携は別の検証対象である。既知のChat返答取得不能に対する問い合わせループは追加していない。MCP read-only公開範囲、global設定、認証/providerは不変更。2026-10-29 08:23 UTC、承認に基づき専用daemon/Tunnelの2サービスのみ再起動し、READY・health・接続済みreadonly MCP status/list/getを確認した。実行中/待機中は0件、既存DBのtask/execution/verification/transition/decisionは前後一致。
+## 検証範囲
 
-## 更新と課題記録
+実local checkoutの固定3文書を読込み、採用commit/hashとローカルcommit/dirtyを確認する。fixture Git repoでは正常・不達・dirty保全・異なるHEAD・等価ローカルcommit・改ざん・版不一致・path解決を検査する。文書別hashとsection境界はcontext組立て時にも再検査する。
 
-本文を更新するときは採用された新原文に従い、manifestとproject pinを意図的に更新し、正本一致とpayload/失敗試験を確認する。hashエラーを消すためだけに再hashしない。既存実行の記録はその実行のversion/hashを保持する。
-
-未解決事項は[`issues/common-policy.json`](issues/common-policy.json)へ、状態・問題・影響・暫定対応・再検討条件を保存する。正本のS0/S1等の意味をこの補足で書き換えない。
+Runner→模擬App Server peerでは実際のdeveloperInstructions・owner metadata・失敗前停止・resumeを検査する。実モデルへの新しい推論や、すべての環境での自動遵守を確認したとは扱わない。中央repoを編集する試験、namespace追加作成、認証変更は行わない。

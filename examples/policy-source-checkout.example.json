@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "checkout": "~/ai-orchestration",
+  "checkout_commit": "<40-hex-local-commit>"
+}

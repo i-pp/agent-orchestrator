@@ -7,7 +7,7 @@ description: Load and verify this orchestration repository's common policy befor
 
 対象repo rootで `python3 -B scripts/policy_context.py --format inspect` を実行する。返された正本全文・version・SHA-256を実際に読み、担当作業に適用する。Skillや正本へのリンクを見ただけで本文を読んだことにしない。
 
-正本はrootの`policies.md`。`config/policy.json`はproject固有の参照/pin、`policies/manifest.json`は共通bundleの検証情報。分割文書は索引のみ。本文はSkillへ複写しない。
+正本はi-pp/ai-orchestration。`config/upstream-policy.json`のcommit/hashを固定し、既存ローカルcheckoutのGit内容を読む。`config/policy.json`でこの参照を必須化する。相対pathはrepo root基準、~はuser homeへ展開し、local設定はGitへ収録しない。読込metadataのupstream commit・実読込checkout commit・HEAD・dirtyを区別する。旧rootの`policies.md`は履歴参照として保全し、本文をSkillやこのrepoへ複写管理しない。
 
 上位実行環境の規則・権限・ユーザーの明示的制約が優先し、このポリシーは権限を追加しない。読込み失敗・競合・hash/version不一致なら、推測や別設定への切替をせず該当するpolicy依存作業を止め、原因を親へ返す。安全で独立した作業は続ける。trust登録、保護された状態領域、認証/provider/MCP公開を変更して回避しない。
 

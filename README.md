@@ -450,3 +450,9 @@ preflightは既存stateとの参照・flag継承、キーmetadata、binary/helpe
 ## 日常運用の追加整備
 
 保存済み参照からの`resume-plan`/`rollback-plan`、停止直前の未解決仕事検査、有限timeout・getter-only再接続を備えた`mailbox_ops.py`、入力拒否と保存状態の監査を追加した。完全な手順と確認範囲は[mailbox運用](docs/mailbox-operations.md)を参照。prepareは承認候補の生成だけで、現用allowlistを変更しない。新しいslotやChat送信は個別の承認範囲で扱う。
+
+## 固定した共通正本とローカル参照
+
+共通指示は[i-pp/ai-orchestration](https://github.com/i-pp/ai-orchestration)のcommit/hashで固定し、既存local checkoutのGit内容から読む。~と相対pathの解決、HEAD/dirtyの記録、旧v1.0の履歴保全と優先順位は[共通policy読込み](docs/common-policy.md)を参照。正本repoへのpull/resetや本文の重複管理はしない。
+
+固定slot毎の追加を避ける[限定grant案](docs/mailbox-grants.md)もコード/fixture試験まで準備した。現用MCPには接続しておらず既定OFF。公開11操作・live固定1slotは変わらない。

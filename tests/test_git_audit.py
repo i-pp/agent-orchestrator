@@ -36,8 +36,8 @@ class GitAuditTests(unittest.TestCase):
     def result(self):
         return audit_module.audit(self.root)
 
-    def test_all_twelve_actual_portable_policy_role_skill_files_pass(self):
-        self.assertEqual(len(audit_module.PORTABLE_CONFIG_FILES),12)
+    def test_all_thirteen_actual_portable_policy_role_skill_files_pass(self):
+        self.assertEqual(len(audit_module.PORTABLE_CONFIG_FILES),13)
         for name in audit_module.PORTABLE_CONFIG_FILES:
             self.write(name,(PROJECT/name).read_bytes())
         result=self.result()

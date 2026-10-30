@@ -3,19 +3,19 @@
   "issues": [
     {
       "id": "OPS-CANONICAL-PATH",
-      "status": "DEFERRED",
-      "problem": "docs/ai/orchestration.md was not found locally; the named remote repository is empty.",
-      "impact": "Cannot claim conformance to an unseen document.",
-      "workaround": "Use the verified policies.md v1.0 without inventing a second canonical text.",
-      "revisit_when": "The canonical document or verified location is supplied."
+      "status": "RESOLVED",
+      "problem": "Canonical documents are in the separate i-pp/ai-orchestration repository. A pre-existing local checkout is available.",
+      "impact": "Do not duplicate common policy text in the runtime repository.",
+      "workaround": "Read the pinned commit/hash through the existing local Git checkout, recording local commit/origin/dirty independently.",
+      "revisit_when": "The canonical revision or local source configuration changes."
     },
     {
       "id": "OPS-NEXT-SLOT",
       "status": "BLOCKED",
       "problem": "Only the original completed slot is approved in the live allowlist.",
       "impact": "A different normal task cannot be registered yet.",
-      "workaround": "Prepare exact immutable request/policy candidates offline; keep live scope unchanged.",
-      "revisit_when": "The exact new slot, text/hash and deployment effects are approved."
+      "workaround": "Prepared a default-OFF bounded workstream grant instead of endless per-slot additions; live adapter is not connected.",
+      "revisit_when": "Exact workstream scope, limits, validity, return retention and cancellation/deployment path are approved."
     },
     {
       "id": "OPS-DOT-CATALOG",

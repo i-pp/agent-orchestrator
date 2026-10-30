@@ -21,6 +21,7 @@ PORTABLE_CONFIG_FILES = {
     ".codex/agents/researcher.toml",
     ".codex/agents/independent_reviewer.toml",
     "config/policy.json",
+    "config/upstream-policy.json",
     "policies.md",
     "policies/manifest.json",
     "policies/orchestration.md",
