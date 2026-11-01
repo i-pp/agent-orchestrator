@@ -100,6 +100,97 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(self.transports[0].client.timeout_s, 10)
         with lease(self.root / 'runner.lock', shared=True): pass
 
+    def test_rejected_read_does_not_poison_verified_completed_session(self):
+        from codex_app_protocol import RpcError
+        thread=self.start()
+        task=self.submit(thread)
+        turns_before=self.peer.count('turn/start')
+        with patch.object(self.gateway.protocol,'request',side_effect=RpcError(-32601,'synthetic private refusal')):
+            result=self.gateway.pipeline.refresh(task['id'])
+        self.assertEqual(result['reconciliation'],'UNKNOWN')
+        self.assertEqual(result['state'],'RUNNING')
+        self.assertFalse(self.gateway.failed)
+        self.assertTrue(self.gateway.held)
+        self.assertEqual(self.peer.count('turn/start'),turns_before)
+        self.complete(thread)
+        self.gateway.pump()
+        self.assertFalse(self.gateway.failed)
+        self.assertFalse(self.gateway.held)
+        self.assertIsNone(self.gateway.protocol)
+        state=self.gateway.pipeline._mutate(lambda s:s['threads'][thread])
+        self.assertTrue(state['history_verified'])
+        next_task=self.submit(thread,key='next-task')
+        self.assertEqual(next_task['state'],'RUNNING')
+        self.assertEqual(self.peer.count('turn/start'),turns_before+1)
+        self.assertEqual(self.peer.count('thread/start'),1)
+
+    def test_unknown_read_still_poisoned_and_holds_original_task(self):
+        from codex_app_protocol import ProtocolUnknown
+        thread=self.start()
+        task=self.submit(thread)
+        with patch.object(self.gateway.protocol,'request',side_effect=ProtocolUnknown('synthetic loss')):
+            result=self.gateway.pipeline.refresh(task['id'])
+        self.assertEqual(result['reconciliation'],'UNKNOWN')
+        self.assertTrue(self.gateway.failed)
+        self.assertTrue(self.gateway.held)
+        self.assertEqual(self.peer.count('turn/start'),1)
+
+    def test_write_rejection_retains_failed_connection_boundary(self):
+        from codex_app_protocol import RpcError
+        thread=self.start()
+        with patch.object(self.gateway.protocol,'request',side_effect=RpcError(-32601,'synthetic refusal')):
+            with self.assertRaises(RpcError):self.gateway.rpc('turn/steer',{})
+        self.assertTrue(self.gateway.failed)
+        self.assertEqual(self.peer.count('turn/start'),0)
+
+    def test_validated_unsupported_read_is_rejected_without_retry_or_false_completion(self):
+        thread=self.start()
+        task=self.submit(thread)
+        transport=self.gateway.transport
+        peer=transport.peer
+        def unsupported(message,timeout):
+            if message['method']=='thread/read':
+                return {'id':message['id'],'error':{'code':-32601,'message':'synthetic private unsupported'}}
+            return peer(message,timeout)
+        with patch.object(transport,'peer',side_effect=unsupported) as exchange:
+            result=self.gateway.pipeline.refresh(task['id'])
+        self.assertEqual(exchange.call_count,1)
+        self.assertEqual(result['state'],'RUNNING')
+        self.assertEqual(result['reconciliation'],'UNKNOWN')
+        self.assertEqual(self.gateway.protocol.diagnostics()['failure_code'],'SERVER_REJECTED')
+        self.assertFalse(self.gateway.failed)
+        self.assertTrue(self.gateway.held)
+        self.assertEqual(self.peer.count('turn/start'),1)
+        logs=[json.loads(p.read_text()) for p in (self.root/'logs').glob('pipeline-rpc-failure-*.json')]
+        self.assertEqual(logs[-1]['rpc_error_code'],-32601)
+        self.assertNotIn('synthetic private unsupported',json.dumps(logs))
+
+    def assert_invalid_read_latched(self,malformed):
+        thread=self.start()
+        task=self.submit(thread)
+        transport=self.gateway.transport
+        peer=transport.peer
+        self.assertFalse(self.gateway.failed)
+        def broken(message,timeout):
+            if message['method']=='thread/read':
+                return {'id':'wrong' if malformed=='wrong-id' else message['id'],
+                    'error':{'code':-32601 if malformed=='wrong-id' else 'invalid','message':'synthetic private'}}
+            return peer(message,timeout)
+        with patch.object(transport,'peer',side_effect=broken) as exchange:
+            result=self.gateway.pipeline.refresh(task['id'])
+        self.assertEqual(exchange.call_count,1)
+        self.assertEqual(result['state'],'RUNNING')
+        self.assertEqual(result['reconciliation'],'UNKNOWN')
+        self.assertTrue(self.gateway.failed)
+        self.assertTrue(self.gateway.held)
+        self.assertEqual(self.peer.count('turn/start'),1)
+
+    def test_uncorrelated_read_ack_remains_unknown_and_latched(self):
+        self.assert_invalid_read_latched('wrong-id')
+
+    def test_malformed_error_read_ack_remains_unknown_and_latched(self):
+        self.assert_invalid_read_latched('bad-error-type')
+
     def test_capabilities_closes_metadata_child_without_thread_or_turn(self):
         before = len(self.peer.calls)
         self.call('capabilities')

@@ -378,6 +378,13 @@ class HostGateway:
     def rpc(self, method, params):
         self.connect()
         try: return self.protocol.request(method, params)
+        except RpcError as error:
+            # A correlated rejection of a read is not a lost connection or a
+            # successful turn. Keep the task held until notification/history
+            # reconciliation; never replay a turn because this read failed.
+            if method != 'thread/read': self.failed = True
+            self.record_failure(method,error)
+            raise
         except Exception as error:
             self.failed = True
             self.record_failure(method,error)
