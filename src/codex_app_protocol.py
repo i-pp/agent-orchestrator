@@ -33,6 +33,7 @@ def schema_version_supported(user_agent):
 SCHEMA_SHA256 = {
     "ClientRequest.json": "9b89e2459362d20cec67a429ef9430fe6b0e9fb8bd87d445d4c9a6acccd87450",
     "JSONRPCResponse.json": "4796738c04c74288213a08fb8d820c7b4df19e0977cdcd35b65ffcb43cfc93ab",
+    "JSONRPCNotification.json": "c2b43f26880db331393fe09f34bdd76dfeb4dc30d8418d1c26e18db166d6c8c8",
     "ServerRequest.json": "f339be472737a0003efa25fba2e6e6c9237e621cd065b6d6995c51256e9dc1fb",
     "ServerNotification.json": "7e8324c4c95da9057611ffe40487c21db40eed69c247a1508d0651e89715e23a",
     "v1/InitializeParams.json": "b55124e7c0f36a1789396daa5578217a92be67f053903696236686e59f6f212e",
@@ -119,7 +120,17 @@ def frame_shape(value):
 
 def _server_message(message):
     allowed = {'id', 'method', 'params', 'jsonrpc'}
-    if isinstance(message, dict) and 'id' in message: allowed.add('trace')
+    request = isinstance(message, dict) and 'id' in message
+    if request:
+        allowed.add('trace')
+    elif type(message) is dict:
+        # The installed generic JSONRPCNotification schema permits extension
+        # fields. Discard them before delivery; do not interpret them as RPCs.
+        # Keep mixed response/event envelopes invalid rather than swallowing a
+        # result or error as an ignored notification extension.
+        if 'result' in message or 'error' in message:
+            raise ProtocolError('mixed server message')
+        message = {k: v for k, v in message.items() if k in allowed}
     _object(message, allowed, {'method'})
     if (type(message['method']) is not str or not message['method']
             or message.get('jsonrpc', '2.0') != '2.0'
@@ -338,8 +349,9 @@ class ProtocolClient:
             result = _result(message["method"], response["result"])
             self._diag['stage'] = 'result_verified'
             return result
-        except RpcError:
+        except RpcError as exc:
             self._diag['failure_code'] = 'SERVER_REJECTED'
+            self._diag['rpc_error_code'] = exc.code
             raise
         except ProtocolError as exc:
             self._diag['failure_code'] = 'INVALID_RESULT_SCHEMA' if self._diag['stage'] == 'result_validation' else 'INVALID_RESPONSE_ENVELOPE'

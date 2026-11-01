@@ -26,6 +26,10 @@ CLIENT = Path.home()/'.local/opt/tunnel-client/v0.0.18/tunnel-client'
 RUNTIME = PROJECT/'.runtime/development-poc-e32-c00a7a45'
 CODEX = Path.home()/'.vscode/extensions/openai.chatgpt-26.1021.22027-linux-x64/bin/linux-x86_64/codex'
 KEY = Path.home()/'.config/agent-orchestrator/credentials/control-plane-api-key'
+SUPERVISOR_MEMORY_BYTES = 512 * 1024**2
+TUNNEL_MEMORY_BYTES = 256 * 1024**2
+SUPERVISOR_TASKS = 64
+TUNNEL_TASKS = 64
 STATE = 'poc-services-state.json'
 ENV = {'PATH': '/usr/bin:/bin', 'HOME': str(Path.home()), 'LANG': 'C.UTF-8'}
 ENV.update(XDG_RUNTIME_DIR='/run/user/'+str(os.getuid()),
@@ -102,6 +106,26 @@ class Services:
         if expected is not None and value != expected:
             raise Refused('Pipeline executor or policy hash differs from the recorded invocation')
         return value
+
+    def memory_budget(self):
+        import scheduler
+        enabled = getattr(self, 'allow_codex_pipeline', False)
+        settings = (scheduler.configuration(codex_pipeline=True) if enabled else scheduler.configuration())
+        # Control.wrap moves the daemon into agentorchestrator.slice. The
+        # supervisor service remains a separate cgroup, not an executor parent.
+        return {'daemon_scope_bytes': settings['daemon']['memory_bytes'],
+                'supervisor_service_bytes': SUPERVISOR_MEMORY_BYTES,
+                'tunnel_service_bytes': TUNNEL_MEMORY_BYTES,
+                'separate_cgroups_total_bytes': settings['daemon']['memory_bytes']
+                    + SUPERVISOR_MEMORY_BYTES + TUNNEL_MEMORY_BYTES}
+
+    def kernel_task_budget(self):
+        import scheduler
+        enabled = getattr(self, 'allow_codex_pipeline', False)
+        settings = (scheduler.configuration(codex_pipeline=True) if enabled else scheduler.configuration())
+        return {'daemon_scope_tasks': settings['daemon']['pids'],
+                'supervisor_service_tasks': SUPERVISOR_TASKS, 'tunnel_service_tasks': TUNNEL_TASKS,
+                'separate_cgroups_total_tasks': settings['daemon']['pids'] + SUPERVISOR_TASKS + TUNNEL_TASKS}
 
     @contextmanager
     def locked(self):
@@ -363,7 +387,8 @@ class Services:
         if commands['daemon'].count('--allow-codex-pipeline') != int(getattr(self, 'allow_codex_pipeline', False)):
             raise Refused('Daemon pipeline capability argument was not inherited')
         if '--allow-writes' in adapter: raise Refused('Task writes are outside this service scope')
-        return {'passed':True,'credential_file_reference':key['path'],'credential_mode':key['mode'],
+        return {'passed':True,'memory_budget': self.memory_budget(), 'kernel_task_budget': self.kernel_task_budget(),
+                'credential_file_reference':key['path'],'credential_mode':key['mode'],
                 'credential_contents_read':False,'tool_names':[t['name'] for t in tool_definitions(
                     False,self.allow_local_llm,self.allow_local_models,self.allow_chat_mailbox,
                     getattr(self,'allow_codex_pipeline',False))],
@@ -378,7 +403,8 @@ class Services:
         name = self.units[role]
         props = {'UMask': '0077', 'KillMode': 'mixed', 'TimeoutStopSec': '60' if role == 'daemon' else '20',
                  'Restart': 'no', 'CPUQuota': '50%' if role == 'daemon' else '25%', 'CPUQuotaPeriodSec': '100ms',
-                 'MemoryMax': '512M' if role == 'daemon' else '256M', 'MemorySwapMax': '0', 'TasksMax': '64',
+                 'MemoryMax': str(SUPERVISOR_MEMORY_BYTES if role == 'daemon' else TUNNEL_MEMORY_BYTES),
+                 'MemorySwapMax': '0', 'TasksMax': str(SUPERVISOR_TASKS if role == 'daemon' else TUNNEL_TASKS),
                  'LimitCORE': '0', 'LimitFSIZE': '64M', 'UnsetEnvironment': UNSET,
                  'StandardOutput': 'append:'+str(self.root/'logs'/('poc-service-'+role+'.log')), 'StandardError': 'inherit'}
         if role == 'tunnel':

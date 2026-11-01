@@ -400,7 +400,17 @@ class Adapter:
             reply = self._handle(message)
             if observed:
                 code = reply.get('error', {}).get('code') if reply else None
-                self.record('protocol_response', method=method, error_code=code)
+                facts = {'method': method, 'error_code': code}
+                if method == 'tools/list' and code is None and reply:
+                    tools = reply.get('result', {}).get('tools')
+                    if isinstance(tools, list):
+                        # Fingerprint the actual response, not configured flags.
+                        # No caller metadata, raw request IDs, or tool payloads.
+                        canonical = json.dumps(tools, sort_keys=True, separators=(',', ':'),
+                                               ensure_ascii=False, allow_nan=False).encode()
+                        facts.update(tool_count=len(tools),
+                                     tools_schema_sha256=hashlib.sha256(canonical).hexdigest())
+                self.record('protocol_response', **facts)
             return reply
         except OSError:
             identifier = message.get('id') if isinstance(message, dict) else None

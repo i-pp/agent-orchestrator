@@ -211,6 +211,8 @@ class Pipeline:
         t = s['threads'].get(ident)
         if not t: raise PipelineError('THREAD_NOT_OWNED')
         if t['archived'] or t.get('closing') or not t.get('remote_id'): raise PipelineError('THREAD_NOT_READY')
+        if t.get('native_context_state', 'READY') != 'READY':
+            raise PipelineError('NATIVE_CONTEXT_RECONCILIATION_REQUIRED', 'UNKNOWN')
         if idle and t['active_task']: raise PipelineError('THREAD_BUSY')
         return t
 
@@ -300,7 +302,8 @@ class Pipeline:
             return {'thread_id': ident}
         def effect(_):
             result = self.client.request('thread/start', {'model': model, 'cwd': self.policy['workspaces'][workspace],
-                'developerInstructions': self.instructions, 'approvalPolicy': 'on-request', 'approvalsReviewer': 'user', 'sandbox': 'read-only'})
+                'developerInstructions': self.instructions, 'approvalPolicy': 'on-request', 'approvalsReviewer': 'user',
+                'sandbox': 'read-only', 'ephemeral': False})
             if (result.get('cwd') != self.policy['workspaces'][workspace] or result.get('model') != model
                     or result.get('modelProvider') != 'openai'
                     or result.get('approvalPolicy') != 'on-request' or result.get('approvalsReviewer') != 'user'
@@ -310,12 +313,98 @@ class Pipeline:
         def finish(s, c, result):
             t = s['threads'][c['thread_id']]
             t['remote_id'] = result['thread']['id']
+            t.update(native_creation_count=1, native_context_state='READY', history_verified=False)
             if any(other['id'] != t['id'] and other['remote_id'] == t['remote_id'] for other in s['threads'].values()):
                 raise PipelineError('REMOTE_THREAD_COLLISION', 'UNKNOWN')
             self.loaded.add(t['id'])
             self._event(s, 'thread_started', t['id'])
             return {'status': 'READY', 'thread_id': t['id'], 'model': model}
         return self._operation(request_key, 'thread_start', [workspace, model], prepare, effect, finish)
+
+    def replace_empty_context(self, thread_id, request_key, evidence, *, admission=None):
+        """Explicit operator recovery only. Never called from normal dispatch."""
+        if not isinstance(request_key,str) or not re.fullmatch(KEY,request_key):
+            raise PipelineError('INVALID_RECOVERY_KEY')
+        keys={'schema','thread_id','ledger_sha256','remote_id_sha256','diagnostic_sha256','diagnostic'}
+        if (not isinstance(evidence,dict) or set(evidence)!=keys or type(evidence['schema']) is not int
+                or evidence['schema']!=1 or evidence['thread_id']!=thread_id
+                or len(packed(evidence).encode())>16384):raise PipelineError('INVALID_EMPTY_CONTEXT_EVIDENCE')
+        for field in ['ledger_sha256','remote_id_sha256','diagnostic_sha256']:
+            if not isinstance(evidence[field],str) or not re.fullmatch('[a-f0-9]{64}',evidence[field]):
+                raise PipelineError('INVALID_EMPTY_CONTEXT_EVIDENCE')
+        proof=evidence['diagnostic']
+        if (not isinstance(proof,dict) or digest(proof)!=evidence['diagnostic_sha256']
+                or proof.get('thread_id')!=thread_id or proof.get('inference_calls')!=0
+                or proof.get('new_threads')!=0 or proof.get('cleanup_status')!='RELEASED'
+                or proof.get('remote_turn_count',0)!=0 or proof.get('history_unknown') is True
+                or not any(c.get('method')=='thread/resume' and c.get('exception_class')=='RpcError'
+                    and c.get('rpc_error_code')==-32600 and c.get('reason_categories')==['NO_ROLLOUT']
+                    for c in proof.get('checks',[]) if isinstance(c,dict))):
+            raise PipelineError('EMPTY_CONTEXT_NOT_PROVEN')
+        proof_hash=digest(evidence)
+        def prepare(s):
+            t=s['threads'].get(thread_id)
+            if digest(s)!=evidence['ledger_sha256'] or not t or digest(t.get('remote_id'))!=evidence['remote_id_sha256']:
+                raise PipelineError('EMPTY_CONTEXT_EVIDENCE_STALE')
+            if (t.get('active_task') or t.get('archived') or t.get('closing') or not t.get('remote_id')
+                    or t.get('history_verified') or t.get('native_creation_count',1)!=1
+                    or t.get('replacement_attempts',0)!=0 or t.get('native_replacements')):
+                raise PipelineError('EMPTY_CONTEXT_RECOVERY_FORBIDDEN')
+            starts=[op for op in s['ops'].values() if op['kind']=='thread_start'
+                    and op.get('context',{}).get('thread_id')==thread_id and op['status']=='SUCCEEDED']
+            if len(starts)!=1 or any(op['kind'] not in ['thread_start','input'] or op['status']!='SUCCEEDED'
+                                     for op in s['ops'].values()):
+                raise PipelineError('PRIOR_OR_UNKNOWN_EXECUTION_FORBIDS_REPLACEMENT')
+            related=[task for task in s['tasks'].values() if task['thread_id']==thread_id]
+            if not related or any(task['state'] not in ['STORED','QUEUED'] or task.get('remote_turn')
+                    or task.get('deadline') is not None or task.get('pending_turn')
+                    or task.get('pending_approval_turn') or task.get('answer') is not None for task in related):
+                raise PipelineError('PRIOR_OR_UNKNOWN_EXECUTION_FORBIDS_REPLACEMENT')
+            if any(e['kind'] not in ['operation_issued','thread_started','input_stored','input_queued'] for e in s['events']):
+                raise PipelineError('UNKNOWN_HISTORY_FORBIDS_REPLACEMENT')
+            t['replacement_attempts']=1
+            t['original_remote_id']=t.get('original_remote_id',t['remote_id'])
+            t['native_context_state']='REPLACEMENT_PENDING'
+            return {'thread_id':thread_id,'previous_remote_id':t['remote_id'],'model':t['model'],
+                    'workspace':t['workspace'],'proof_sha256':proof_hash}
+        def effect(c):
+            if admission is not None:admission()
+            self._model(c['model'])
+            result=self.client.request('thread/start',{'model':c['model'],'cwd':self.policy['workspaces'][c['workspace']],
+                'developerInstructions':self.instructions,'approvalPolicy':'on-request','approvalsReviewer':'user',
+                'sandbox':'read-only','ephemeral':False})
+            if (not opaque(result.get('thread',{}).get('id')) or result['thread']['id']==c['previous_remote_id']
+                    or result.get('model')!=c['model'] or result.get('cwd')!=self.policy['workspaces'][c['workspace']]
+                    or result.get('modelProvider')!='openai' or result.get('approvalPolicy')!='on-request'
+                    or result.get('approvalsReviewer')!='user' or result.get('sandbox',{}).get('type')!='readOnly'):
+                raise PipelineError('REPLACEMENT_SCOPE_MISMATCH','UNKNOWN')
+            return result
+        def finish(s,c,result):
+            t=s['threads'][thread_id];remote=result['thread']['id']
+            if any(other['id']!=thread_id and other.get('remote_id')==remote for other in s['threads'].values()):
+                raise PipelineError('REMOTE_THREAD_COLLISION','UNKNOWN')
+            t['native_replacements']=[{'previous_remote_id':c['previous_remote_id'],'remote_id':remote,
+                'reason':'EMPTY_NO_ROLLOUT','proof_sha256':proof_hash,'request_key_hash':digest(request_key)}]
+            t.update(remote_id=remote,native_creation_count=2,native_context_state='READY',history_verified=False)
+            self.loaded.add(thread_id)
+            self._event(s,'native_context_replaced',thread_id,native_creation_count=2,reason_code='EMPTY_NO_ROLLOUT')
+            return {'status':'READY','thread_id':thread_id,'native_creation_count':2}
+        try:
+            output=self._operation(request_key,'native_context_replace',[thread_id,proof_hash],prepare,effect,finish)
+            if output.get('status') not in ['READY']:
+                def uncertain(s):
+                    t=s['threads'].get(thread_id)
+                    if t and t.get('native_context_state')=='REPLACEMENT_PENDING':
+                        t['native_context_state']='REPLACEMENT_UNKNOWN'
+                self._mutate(uncertain)
+            return output
+        except Exception:
+            # A committed intent/unknown ACK must never become a generic retry.
+            def preserve(s):
+                t=s['threads'].get(thread_id)
+                if t and t.get('native_context_state')=='REPLACEMENT_PENDING':t['native_context_state']='REPLACEMENT_UNKNOWN'
+            self._mutate(preserve)
+            raise
 
     def store(self, thread_id, prompt, request_key, model=None, *, queue=False):
         text(prompt)
@@ -361,6 +450,8 @@ class Pipeline:
         if not ident: return {'status': 'IDLE_OR_HELD'}
         if self.admission is not None and not self.admission(): return {'status': 'SHARED_BUDGET_HELD'}
         task = self._mutate(lambda s: dict(self._task(s, ident)))
+        try:self._mutate(lambda s:self._thread(s,task['thread_id'],idle=True))
+        except PipelineError as error:return {'status':'BLOCKED','code':error.code,'task_id':ident}
         try:
             self._model(task['model'])
         except PipelineError as error:
@@ -385,7 +476,16 @@ class Pipeline:
                     or result.get('cwd') != self.policy['workspaces'][thread['workspace']]
                     or result.get('approvalPolicy') != 'on-request' or result.get('approvalsReviewer') != 'user'
                     or result.get('sandbox', {}).get('type') != 'readOnly'):
-                raise PipelineError('RESUME_SCOPE_MISMATCH', 'UNKNOWN')
+                # A validated reply with the wrong scope proves no turn was
+                # dispatched. Persist a blocker instead of auto-resuming on
+                # every daemon tick. Never import or execute the other scope.
+                def block_resume(s):
+                    current = self._task(s, ident)
+                    current.update(state='BLOCKED', reason_code='RESUME_SCOPE_MISMATCH', execution_started=False)
+                    self._event(s, 'task_blocked', current['thread_id'], ident,
+                                reason_code='RESUME_SCOPE_MISMATCH')
+                    return self._view(current)
+                return self._mutate(block_resume)
             self.loaded.add(thread['id'])
         def prepare(s):
             task = self._task(s, ident)
@@ -558,7 +658,8 @@ class Pipeline:
         if name == 'codex_thread_archive': return self.archive(**a)
         if name == 'codex_task_get': return self.refresh(**a)
         if name == 'codex_threads_list':
-            return self._mutate(lambda s: {'threads': [{k: v for k, v in t.items() if k != 'remote_id'} for t in s['threads'].values()],
+            return self._mutate(lambda s: {'threads': [{k: v for k, v in t.items()
+                if k not in ('remote_id','original_remote_id','native_replacements')} for t in s['threads'].values()],
                 'tasks': [{k: v for k, v in self._view(t).items() if k != 'answer'} for t in s['tasks'].values()]})
         if name == 'codex_events':
             return self._mutate(lambda s: {'events': s['events'][a.get('after', 0):a.get('after', 0)+a.get('limit', 20)],

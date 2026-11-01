@@ -2,6 +2,8 @@
   "poll_seconds": 0.2,
   "task_timeout": 120,
   "shutdown_seconds": 15,
+  "pipeline_daemon_memory_bytes": 1073741824,
+  "pipeline_daemon_pids": 512,
   "daemon": {
     "cpu_percent": 50,
     "cpu_budget_ms": 86400000,

@@ -24,7 +24,8 @@ from transport import Process, redact
 class Daemon:
     def __init__(self, root, binary=None, *, worker_factory=None, development=False,
                  allow_codex_pipeline=False, pipeline_factory=None):
-        self.settings = scheduler.configuration()
+        self.settings = (scheduler.configuration(codex_pipeline=True) if allow_codex_pipeline
+                         else scheduler.configuration())
         self.runner = Runner(root, binary, development=development)
         self.root, self.store = self.runner.root, self.runner.store
         try: self.lease = lease(self.root / "daemon.lock")
@@ -96,6 +97,17 @@ class Daemon:
 
     def handle(self, method, params):
         if not isinstance(params, dict): raise ValueError("params must be an object")
+        if method == 'codex_pipeline_replace_empty':
+            if (not self.allow_codex_pipeline or self.pipeline is None
+                    or set(params)!={'thread_id','request_key','evidence'}
+                    or not self.status()['paused'] or self.children or self.pending_recovery):
+                raise ValueError('Paused idle owned pipeline required for empty-context replacement')
+            return self.pipeline.replace_empty_context(params['thread_id'],params['request_key'],params['evidence'])
+        if method == 'codex_pipeline_inspect':
+            if (not self.allow_codex_pipeline or self.pipeline is None or set(params)!={'thread_id'}
+                    or not self.status()['paused'] or self.children or self.pending_recovery):
+                raise ValueError('Paused idle owned pipeline required for operator inspection')
+            return self.pipeline.inspect_owned_thread(params['thread_id'])
         if method == 'codex_pipeline':
             if not self.allow_codex_pipeline or self.pipeline is None: raise ValueError('Pipeline capability is not enabled')
             from codex_pipeline import PipelineError, validate_arguments
@@ -382,7 +394,8 @@ class Daemon:
 
 
 def foreground(root, binary=None, serve_argv=None, *, development=False, allow_codex_pipeline=False):
-    settings = scheduler.configuration()
+    settings = (scheduler.configuration(codex_pipeline=True) if allow_codex_pipeline
+                else scheduler.configuration())
     from isolation import prepare
     development_poc.configure(root, development)
     root, binary = prepare(root, binary)
@@ -418,8 +431,10 @@ def foreground(root, binary=None, serve_argv=None, *, development=False, allow_c
     return 0 if result["exit_code"] == 0 and result["resources"]["confirmed"] and not result["resources"]["exceeded"] and result["resources"]["released"] else 1
 
 
-def verify_self_limits():
-    values = scheduler.configuration()["daemon"]
+def verify_self_limits(*, allow_codex_pipeline=False):
+    settings = (scheduler.configuration(codex_pipeline=True) if allow_codex_pipeline
+                else scheduler.configuration())
+    values = settings["daemon"]
     from resources import counters
     rel = Path('/proc/self/cgroup').read_text().strip().split('::')[1]
     group = Path('/sys/fs/cgroup') / rel.lstrip('/')
@@ -439,5 +454,5 @@ if __name__ == "__main__":
     parser.add_argument('--allow-codex-pipeline', action='store_true')
     args = parser.parse_args()
     os.umask(0o077)
-    verify_self_limits()
+    verify_self_limits(allow_codex_pipeline=args.allow_codex_pipeline)
     raise SystemExit(Daemon(args.runtime, args.codex, development=args.development_poc, allow_codex_pipeline=args.allow_codex_pipeline).run())

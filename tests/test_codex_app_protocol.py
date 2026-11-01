@@ -143,12 +143,37 @@ class ProtocolTests(unittest.TestCase):
         peer.answer = lambda m: {'id': m['id'], 'error': {'code': -32001, 'message': 'anonymized private error'}}
         with self.assertRaises(RpcError): client.request('account/read', {'refreshToken': False})
         self.assertEqual(client.diagnostics()['failure_code'], 'SERVER_REJECTED')
-        self.assertNotIn('rpc_error_code', client.diagnostics())
+        self.assertEqual(client.diagnostics()['rpc_error_code'], -32001)
         self.assertNotIn('anonymized private error', json.dumps(client.diagnostics()))
         peer.answer = lambda m: {'id': m['id'], 'result': {'requiresOpenaiAuth': 'invalid-type'}}
         with self.assertRaises(ProtocolUnknown): client.request('account/read', {'refreshToken': False})
         self.assertEqual(client.diagnostics()['failure_code'], 'INVALID_RESULT_SCHEMA')
         self.assertNotIn('rpc_error_code', client.diagnostics())
+
+    def test_notification_extensions_are_dropped_without_enabling_requests(self):
+        events = []
+        client, peer = self.client(event_sink=events.append)
+        before = len(peer.calls)
+        notification = {'method': 'fixture/notification', 'params': {},
+                        'canary-extension': {'secret': 'canary-value'},
+                        'trace': {'traceparent': 'canary-trace'}}
+        event = client.receive(notification)
+        self.assertEqual(event, {'kind': 'notification', 'known': False,
+            'approval_required': False, 'message': {'method': 'fixture/notification', 'params': {}}})
+        self.assertNotIn('canary', json.dumps(events + [client.diagnostics()]))
+        self.assertEqual(len(peer.calls), before)
+        for frame in [dict(notification, id='unknown-request'),
+                      {'method': 'x', 'id': None}, {'method': 'x', 'id': True},
+                      dict(notification, jsonrpc='invalid'),
+                      dict(notification, result={}), dict(notification, error={})]:
+            with self.subTest(fields=sorted(frame)), self.assertRaises(ProtocolError):
+                client.receive(frame)
+        # A valid unknown server request is still a request, never a notification
+        # and never answered by the client.
+        event = client.receive({'id': 'unknown-request', 'method': 'fixture/request', 'params': {}})
+        self.assertEqual(event['kind'], 'server_request')
+        self.assertFalse(event['known'])
+        self.assertEqual(len(peer.calls), before)
 
     def test_unsafe_and_unknown_methods_never_reach_peer(self):
         client, peer = self.client()
@@ -458,6 +483,48 @@ class StdioTests(unittest.TestCase):
         self.assertEqual(transport.diagnostics()['last_frame_shape']['fields']['trace'], 'object')
         self.assertNotIn('anonymous-trace', json.dumps(transport.diagnostics()))
         self.assertEqual([x['method'] for x in process.sent()], ['initialize', 'initialized', 'account/read'])
+
+    def test_opaque_notification_extension_during_readonly_account_and_model_reads(self):
+        process = PipeProcess()
+        self.addCleanup(process.cleanup)
+        transport = StdioTransport()
+        self.addCleanup(transport.close)
+        events = []
+        def observer(event):
+            events.append(event)
+            if event['kind'] == 'server_request':
+                raise ProtocolError('READ_ONLY_BOUNDARY')
+        client = ProtocolClient(transport, event_sink=observer)
+        transport.bind_client(client)
+        with patch('codex_app_protocol.subprocess.Popen', return_value=process):
+            transport.start()
+        process.emit({'id': 1, 'result': INITIALIZE}); client.initialize()
+        # Anonymous synthetic frame matches the receipt's structural facts;
+        # neither this method nor the extra key is claimed to be the live one.
+        notification = {'method': 'fixture/opaque', 'params': {},
+                        'canary-extension': {'private': 'canary-value'}}
+        self.assertEqual(frame_shape(notification), {'type': 'object',
+            'fields': {'method': 'string', 'params': 'object'},
+            'other_field_count': 1, 'method_class': 'OTHER'})
+        process.emit(notification)
+        process.emit({'id': 2, 'result': {'account': None, 'requiresOpenaiAuth': True}})
+        self.assertEqual(client.request('account/read'), {'account': None, 'requiresOpenaiAuth': True})
+        process.emit({'id': 3, 'result': {'data': [MODEL]}})
+        self.assertEqual(client.model_catalog(), {'data': [MODEL]})
+        self.assertEqual(events[0]['kind'], 'notification')
+        self.assertNotIn('canary', json.dumps(events + [client.diagnostics(), transport.diagnostics()]))
+        self.assertEqual([m['method'] for m in process.sent()],
+                         ['initialize', 'initialized', 'account/read', 'model/list'])
+
+    def test_unknown_server_request_with_extension_still_poisoned_without_response(self):
+        transport, process = self.transport(event_sink=lambda message: self.fail('must reject before delivery'))
+        process.emit({'id': 'server-unknown', 'method': 'fixture/request', 'params': {},
+                      'canary-extension': 'canary-value'})
+        with self.assertRaises(ProtocolUnknown):
+            transport({'id': 1, 'method': 'account/read', 'params': {'refreshToken': False}}, 1)
+        self.assertEqual(transport.diagnostics()['failure_code'], 'SERVER_MESSAGE_ENVELOPE')
+        self.assertEqual([m['method'] for m in process.sent()], ['account/read'])
+        self.assertNotIn('canary', json.dumps(transport.diagnostics()))
 
     def test_nonstandard_response_key_is_shape_only_and_not_mislabelled_auth(self):
         transport, process = self.transport()

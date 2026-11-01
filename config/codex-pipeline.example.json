@@ -1,9 +1,13 @@
 {
   "schema": 1,
-  "workspaces": {"development": "<PROJECT_ROOT>"},
-  "models": ["<MODEL_ID_FROM_INSTALLED_APP_SERVER>"],
-  "max_threads": 4,
-  "max_tasks": 16,
+  "workspaces": {
+    "development": "<PROJECT_ROOT>"
+  },
+  "models": [
+    "<MODEL_ID_FROM_INSTALLED_APP_SERVER>"
+  ],
+  "max_threads": 1,
+  "max_tasks": 1,
   "concurrency": 1,
   "timeout_seconds": 120
 }

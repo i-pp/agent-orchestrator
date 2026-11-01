@@ -15,12 +15,34 @@ from chat_mailbox import _private, _json
 from common_policy import load_project_policy, developer_instructions
 from concurrency import lease
 from control_socket import request
-from codex_app_protocol import ProtocolClient, ProtocolUnknown, StdioTransport, schema_version_supported
+from codex_app_protocol import ProtocolClient, ProtocolUnknown, RpcError, StdioTransport, schema_version_supported
 from codex_pipeline import Pipeline, PipelineError, HELD, TERMINAL, TOOLS, validate_policy, validate_arguments
 from isolation_guard import environment
 from transport import proc_identity
 
 CLEANUP = 'codex-pipeline-cleanup.json'
+# Cold owned-thread dispatch has at most nine 10-second exchanges (including
+# initialized). Allow bounded cleanup/IPC headroom below the MCP 120s boundary.
+PIPELINE_CONTROL_TIMEOUT_SECONDS = 110
+
+
+def rpc_failure(method, error, client=None):
+    """Fixed categories only; server error bodies/paths/auth never enter logs."""
+    result = {'method': method, 'exception_class': type(error).__name__}
+    if isinstance(error, RpcError):
+        result['rpc_error_code'] = error.code
+        message = error.server_message.lower()
+        patterns = [('no rollout found', 'NO_ROLLOUT'), ('not materialized', 'NOT_MATERIALIZED'),
+                    ('before first user message', 'BEFORE_FIRST_MESSAGE'),
+                    ('thread not found', 'THREAD_NOT_FOUND'), ('invalid argument', 'INVALID_ARGUMENT'),
+                    ('experimental', 'EXPERIMENTAL_FEATURE_REQUIRED')]
+        result['reason_categories'] = [name for text, name in patterns if text in message]
+        if not result['reason_categories']: result['reason_categories'] = ['UNCLASSIFIED_SERVER_REJECTION']
+    if client is not None:
+        diag = client.diagnostics()
+        result['protocol'] = {k:v for k,v in diag.items() if k in
+            ['last_method','stage','failure_code','rpc_error_code','initialized','request_sequence']}
+    return result
 
 
 def process_snapshot():
@@ -87,20 +109,23 @@ class DaemonPipelineProxy:
     def __init__(self, runtime): self.root = runtime
     def dispatch(self, tool, arguments):
         validate_arguments(tool, arguments)
-        return request(self.root, 'codex_pipeline', {'tool': tool, 'arguments': arguments}, timeout=45)
+        return request(self.root, 'codex_pipeline', {'tool': tool, 'arguments': arguments},
+                       timeout=PIPELINE_CONTROL_TIMEOUT_SECONDS)
 
 
 class HostTransport(StdioTransport):
     """A fixed native ELF in its own process group; track PID/start identities."""
-    def __init__(self, binary):
+    def __init__(self, binary, workspace=None):
         super().__init__()
         self.COMMAND = (binary, 'app-server', '--listen', 'stdio://')
+        self.workspace = workspace
         self.seen = {}
         self.cleanup_confirmed = False
 
     def _spawn(self):
         return subprocess.Popen(list(self.COMMAND), shell=False, stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0, close_fds=True, start_new_session=True)
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0, close_fds=True, start_new_session=True,
+            **({'cwd': self.workspace} if self.workspace is not None else {}))
 
     def observe(self):
         if self._proc is None: return
@@ -179,6 +204,7 @@ class HostGateway:
         self.transport_factory = transport_factory
         self.transport = self.protocol = self.budget = None
         self.failed = False
+        self.context_deadlines = {}
         marker = self.root / CLEANUP
         if marker.exists() or marker.is_symlink():
             _private(marker, 32768)
@@ -211,6 +237,107 @@ class HostGateway:
         try: os.fsync(directory)
         finally: os.close(directory)
 
+    def record_failure(self, method, error):
+        facts = rpc_failure(method, error, self.protocol)
+        path = self.root / 'logs' / ('pipeline-rpc-failure-' + uuid.uuid4().hex + '.json')
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd,'w') as stream:
+            json.dump(facts,stream);stream.flush();os.fsync(stream.fileno())
+        return facts
+
+    def inspect_owned_thread(self, thread_id):
+        """Operator-only paused reconciliation; fixed read/resume, never a turn."""
+        if self.held or self.transport is not None or self.protocol is not None or self.budget is not None:
+            raise PipelineError('EXECUTOR_NOT_IDLE_FOR_INSPECTION')
+        with closing(sqlite3.connect(self.pipeline.db.as_uri()+'?mode=ro',uri=True)) as conn:
+            state=json.loads(conn.execute('SELECT body FROM ledger WHERE id=1').fetchone()[0])
+        thread=state['threads'].get(thread_id)
+        if (not thread or thread['active_task'] or not thread.get('remote_id')
+                or thread.get('archived') or thread.get('closing')):
+            raise PipelineError('OWNED_IDLE_THREAD_REQUIRED')
+        if any(op.get('kind')=='dispatch' for op in state['ops'].values()):
+            raise PipelineError('TURN_DISPATCH_REQUIRES_SEPARATE_RECONCILIATION')
+        self.require_host()
+        self.budget=lease(self.root/'runner.lock')
+        result={'thread_id':thread_id,'inference_calls':0,'new_threads':0,'checks':[]}
+        client=None
+        stage='preflight'
+        try:
+            if executor_snapshot(self.root,self.binary)!=self.snapshot:
+                raise PipelineError('EXECUTOR_POLICY_CHANGED')
+            self.marker('UNKNOWN')
+            self.transport=self.transport_factory(self.binary)
+            self.transport.workspace=self.pipeline.policy['workspaces'][thread['workspace']]
+            client=ProtocolClient(self.transport,timeout_s=10)
+            self.transport.bind_client(client);self.transport.start()
+            stage='initialize'
+            initialized=client.initialize()
+            if not schema_version_supported(initialized['userAgent']):raise PipelineError('UNVERIFIED_SERVER_VERSION')
+            calls=[('account/read',{'refreshToken':False}),('model/list',{'includeHidden':False,'limit':100}),
+                   ('thread/read',{'threadId':thread['remote_id'],'includeTurns':True}),
+                   ('thread/resume',{'threadId':thread['remote_id'],'excludeTurns':True,
+                    'model':thread['model'],'cwd':self.transport.workspace,'developerInstructions':self.pipeline.instructions,
+                    'approvalPolicy':'on-request','approvalsReviewer':'user','sandbox':'read-only'})]
+            for method,params in calls:
+                stage=method
+                try:reply=client.request(method,params)
+                except RpcError as error:
+                    result['checks'].append(rpc_failure(method,error,client))
+                    if method in ['account/read','model/list']:break
+                    continue
+                result['checks'].append({'method':method,'status':'ACKNOWLEDGED'})
+                if method=='account/read':
+                    result['account_type_is_chatgpt']=(reply.get('account') or {}).get('type')=='chatgpt'
+                    if not result['account_type_is_chatgpt']:break
+                if method=='thread/read':
+                    result['read_scope_matches']=reply['thread'].get('id')==thread['remote_id']
+                    if not result['read_scope_matches']:break
+                    count=len(reply['thread'].get('turns',[]))
+                    result['remote_turn_count']=count
+                    if count:break
+                if method=='thread/resume':
+                    result['resume_scope_matches']=(reply['thread']['id']==thread['remote_id']
+                        and reply.get('model')==thread['model'] and reply.get('modelProvider')=='openai'
+                        and reply.get('cwd')==self.transport.workspace and reply.get('approvalPolicy')=='on-request'
+                        and reply.get('approvalsReviewer')=='user' and reply.get('sandbox',{}).get('type')=='readOnly')
+            return result
+        except Exception as error:
+            result['checks'].append(rpc_failure(stage,error,client))
+            return result
+        finally:
+            try:
+                safe=True
+                if self.transport is not None:
+                    self.transport.close();safe=self.transport.cleanup_confirmed
+                    self.marker('RELEASED' if safe else 'UNKNOWN')
+                    if safe:self.transport=None
+                elif client is None:
+                    # No transport was constructed, so no native process forked.
+                    self.marker('RELEASED')
+                if safe and self.budget is not None:self.budget.close();self.budget=None
+                if not safe:self.failed=True
+                result['cleanup_status']='RELEASED' if safe else 'UNKNOWN'
+            except Exception as error:
+                self.failed=True
+                result.update(cleanup_status='UNKNOWN',cleanup_exception_class=type(error).__name__)
+
+    def replace_empty_context(self, thread_id, request_key, evidence):
+        """Same-UID paused operator action; exactly one proven-empty replacement."""
+        if self.held or self.transport is not None or self.protocol is not None or self.budget is not None:
+            raise PipelineError('EXECUTOR_NOT_IDLE_FOR_REPLACEMENT')
+        def admit():
+            # Called only after durable proof validation/intent. Paused ordinary
+            # admission is intentionally bypassed for metadata creation, not a turn.
+            self.require_host()
+            self.budget=lease(self.root/'runner.lock')
+            self.failed=False
+        try:
+            result=self.pipeline.replace_empty_context(thread_id,request_key,evidence,admission=admit)
+            if result.get('status')=='READY' and not result.get('duplicate'):
+                self.context_deadlines[thread_id]=time.monotonic()+self.pipeline.policy['timeout_seconds']
+            return result
+        finally:self.release_idle()
+
     @property
     def held(self): return pipeline_held(self.root)
 
@@ -232,7 +359,8 @@ class HostGateway:
         if executor_snapshot(self.root, self.binary) != self.snapshot: raise PipelineError('EXECUTOR_POLICY_CHANGED')
         self.marker('UNKNOWN')  # Before fork; crash never proves cleanup.
         self.transport = self.transport_factory(self.binary)
-        self.protocol = ProtocolClient(self.transport, event_sink=self.pipeline.receive, timeout_s=2)
+        self.transport.workspace = sorted(self.pipeline.policy['workspaces'].values())[0]
+        self.protocol = ProtocolClient(self.transport, event_sink=self.pipeline.receive, timeout_s=10)
         self.transport.bind_client(self.protocol)
         self.pipeline.loaded.clear()
         self.pipeline.transport = self.transport
@@ -240,19 +368,47 @@ class HostGateway:
             self.transport.start()
             initialized = self.protocol.initialize()
             if not schema_version_supported(initialized['userAgent']): raise PipelineError('UNVERIFIED_SERVER_VERSION')
-        except Exception:
+        except Exception as error:
             self.failed = True
+            self.record_failure('initialize',error)
             raise
 
     def rpc(self, method, params):
         self.connect()
         try: return self.protocol.request(method, params)
-        except Exception:
+        except Exception as error:
             self.failed = True
+            self.record_failure(method,error)
             raise
 
-    def release_idle(self):
+    def release_idle(self, *, force=False):
         if self.pipeline._mutate(lambda s: any(t['state'] in HELD for t in s['tasks'].values())): return
+        if self.protocol is not None and not force:
+            threads=self.pipeline._mutate(lambda s:[dict(t) for t in s['threads'].values()
+                if t['id'] in self.pipeline.loaded and not t.get('history_verified')
+                and not t.get('archived') and not t.get('closing')])
+            for thread in threads:
+                tasks=self.pipeline._mutate(lambda s:[dict(t) for t in s['tasks'].values() if t['thread_id']==thread['id']])
+                turned=[t for t in tasks if t.get('remote_turn')]
+                if turned:
+                    try:
+                        remote=self.rpc('thread/read',{'threadId':thread['remote_id'],'includeTurns':True})['thread']
+                        expected={'COMPLETED':'completed','FAILED':'failed','CANCELLED':'interrupted'}
+                        observed={t.get('id'):t.get('status') for t in remote.get('turns',[])}
+                        if (remote.get('id')!=thread['remote_id'] or
+                                any(expected.get(t['state']) is None or
+                                    observed.get(t['remote_turn'])!=expected[t['state']] for t in turned)):
+                            raise PipelineError('FIRST_TURN_HISTORY_UNCONFIRMED','UNKNOWN')
+                        self.pipeline._mutate(lambda s:s['threads'][thread['id']].update(history_verified=True))
+                        self.context_deadlines.pop(thread['id'],None)
+                    except Exception:
+                        self.failed=True
+                        self.pipeline._mutate(lambda s:s['threads'][thread['id']].update(native_context_state='HISTORY_UNKNOWN'))
+                elif not self.failed:
+                    deadline=self.context_deadlines.setdefault(thread['id'],time.monotonic()+self.pipeline.policy['timeout_seconds'])
+                    if time.monotonic()<deadline:return
+                    self.pipeline._mutate(lambda s:s['threads'][thread['id']].update(native_context_state='EMPTY_CONTEXT_EXPIRED'))
+                    self.context_deadlines.pop(thread['id'],None)
         marker = self.root / CLEANUP
         safe = not marker.exists() or _json(marker.read_bytes()).get('status') == 'RELEASED'
         if self.transport is not None:
@@ -260,6 +416,7 @@ class HostGateway:
             self.marker('RELEASED' if safe else 'UNKNOWN')
             self.protocol = None
             self.pipeline.transport = None
+            self.pipeline.loaded.clear()
             if safe: self.transport = None
         if safe and self.budget is not None:
             self.budget.close(); self.budget = None
@@ -289,17 +446,22 @@ class HostGateway:
         finally: self.release_idle()
 
     def close(self):
+        uncertain = False
         try:
-            ids = self.pipeline._mutate(lambda s: [t['id'] for t in s['tasks'].values() if t['state'] in HELD])
-            for ident in ids:
-                try: self.pipeline.cancel(ident, 'shutdown:' + ident)
-                except Exception: pass
-            if self.transport is not None:
-                self.transport.close()
-                self.marker('RELEASED' if self.transport.cleanup_confirmed else 'UNKNOWN')
-            def uncertain(s):
+            try:
+                ids = self.pipeline._mutate(lambda s: [t['id'] for t in s['tasks'].values() if t['state'] in HELD])
+                for ident in ids:
+                    try: self.pipeline.cancel(ident, 'shutdown:' + ident)
+                    except Exception: pass
+            except Exception: uncertain = True
+            finally:
+                if self.transport is not None:
+                    try: self.transport.close()
+                    finally: self.marker('RELEASED' if self.transport.cleanup_confirmed and not uncertain else 'UNKNOWN')
+            def preserve_unknown(s):
                 for task in s['tasks'].values():
                     if task['state'] in HELD: task['state'] = 'UNKNOWN'
-            self.pipeline._mutate(uncertain)
+            try: self.pipeline._mutate(preserve_unknown)
+            except Exception: self.marker('UNKNOWN')
         finally:
             if self.budget is not None: self.budget.close(); self.budget = None

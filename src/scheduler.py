@@ -17,11 +17,15 @@ from transport import proc_identity
 CONFIG = Path(__file__).resolve().parents[1] / "scheduler-config.json"
 
 
-def configuration():
+def configuration(*, codex_pipeline=False):
+    if type(codex_pipeline) is not bool:
+        raise ValueError("Pipeline budget selection must be boolean")
     if CONFIG.is_symlink():
         raise ValueError("Scheduler configuration must not be a symlink")
     value = json.loads(CONFIG.read_text())
-    if set(value) != {"poll_seconds", "task_timeout", "shutdown_seconds", "daemon", "worker"}:
+    required = {"poll_seconds", "task_timeout", "shutdown_seconds", "daemon", "worker"}
+    optional = {"pipeline_daemon_memory_bytes", "pipeline_daemon_pids"}
+    if not required <= set(value) or set(value) - required - optional:
         raise ValueError("Unknown scheduler configuration")
     for name, maximum in [("poll_seconds", 5), ("task_timeout", 3600), ("shutdown_seconds", 30)]:
         v = value[name]
@@ -31,6 +35,20 @@ def configuration():
         if not isinstance(value[role], dict) or set(value[role]) != {"cpu_percent", "cpu_budget_ms", "memory_bytes", "pids"}:
             raise ValueError("Invalid controller resource policy")
         value[role] = policy({**policy(), **value[role]})
+    pipeline_memory = value.get("pipeline_daemon_memory_bytes")
+    if "pipeline_daemon_memory_bytes" in value:
+        if type(pipeline_memory) is not int or pipeline_memory < value["daemon"]["memory_bytes"]:
+            raise ValueError("Pipeline memory must be a finite integer at least the base daemon limit")
+        policy({**value["daemon"], "memory_bytes": pipeline_memory})
+    pipeline_pids = value.get("pipeline_daemon_pids")
+    if "pipeline_daemon_pids" in value:
+        if type(pipeline_pids) is not int or not value["daemon"]["pids"] <= pipeline_pids <= 512:
+            raise ValueError("Pipeline task budget must be a finite integer between the base limit and 512")
+    if codex_pipeline:
+        if pipeline_memory is None or pipeline_pids is None:
+            raise ValueError("Pipeline memory and task budgets must be explicitly configured")
+        value["daemon"]["memory_bytes"] = pipeline_memory
+        value["daemon"]["pids"] = pipeline_pids
     return value
 
 

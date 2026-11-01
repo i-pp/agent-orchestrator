@@ -1,6 +1,7 @@
 """Modern discovery regression; only private fixtures and loopback control plane."""
 
 import json
+import hashlib
 import os
 from pathlib import Path
 import signal
@@ -13,7 +14,7 @@ from unittest.mock import patch
 
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / 'src'))
-from mcp_adapter import Adapter, PROTOCOL, REQUEST_PROTOCOL, VERSION_META, CAPABILITIES_META, SERVER_META
+from mcp_adapter import Adapter, PROTOCOL, REQUEST_PROTOCOL, VERSION_META, CAPABILITIES_META, SERVER_META, tool_definitions
 from control_socket import request
 from systemd_fixture import ControlPlane
 from test_phase2_e1 import Client
@@ -139,6 +140,35 @@ class DiscoveryTests(unittest.TestCase):
         self.assertIn('result', self.adapter.handle(rpc('tools/list', {'cursor': None})))
         for cursor in ['unknown', '', 1, []]:
             self.assertEqual(self.adapter.handle(rpc('tools/list', {'cursor': cursor}))['error']['code'], -32602)
+
+    def test_discovery_fingerprint_matches_actual_response_for_11_and_23_tools(self):
+        for pipeline, expected in [(False, 11), (True, 23)]:
+            with self.subTest(pipeline=pipeline):
+                self.adapter.tools = tool_definitions(False, True, True, True, pipeline)
+                message = rpc('tools/list')
+                message['id'] = 'private-id-sentinel'
+                message['params']['_meta']['private-field'] = 'private-metadata-sentinel'
+                reply = self.adapter.handle(message)
+                actual = reply['result']['tools']
+                canonical = json.dumps(actual, sort_keys=True, separators=(',', ':'),
+                                       ensure_ascii=False, allow_nan=False).encode()
+                record = json.loads(self.adapter.audit_path.read_text().splitlines()[-1])
+                self.assertEqual(record['tool_count'], expected)
+                self.assertEqual(record['tools_schema_sha256'], hashlib.sha256(canonical).hexdigest())
+                self.assertEqual(record['event'], 'protocol_response')
+                self.assertIsNone(record['error_code'])
+                audit = self.adapter.audit_path.read_text()
+                self.assertNotIn('private-id-sentinel', audit)
+                self.assertNotIn('private-metadata-sentinel', audit)
+                self.assertNotIn('inputSchema', audit)
+
+    def test_rejected_discovery_has_no_success_fingerprint(self):
+        reply = self.adapter.handle(rpc('tools/list', {'cursor': 'unknown'}))
+        self.assertEqual(reply['error']['code'], -32602)
+        record = json.loads(self.adapter.audit_path.read_text().splitlines()[-1])
+        self.assertEqual(record['error_code'], -32602)
+        self.assertNotIn('tool_count', record)
+        self.assertNotIn('tools_schema_sha256', record)
 
     def test_real_stdio_discovery_list_and_unavailable_daemon(self):
         client = Client(self.root)

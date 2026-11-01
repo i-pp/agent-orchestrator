@@ -93,14 +93,180 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(self.transports, [])
 
     def test_metadata_session_closes_and_releases_runner_budget(self):
-        self.start()
+        self.call('capabilities')
         self.assertTrue(self.transports[0].closed)
         self.assertFalse(self.gateway.held)
+        self.assertEqual(self.transports[0].workspace, str(self.workspace))
+        self.assertEqual(self.transports[0].client.timeout_s, 10)
         with lease(self.root / 'runner.lock', shared=True): pass
+
+    def test_capabilities_closes_metadata_child_without_thread_or_turn(self):
+        before = len(self.peer.calls)
+        self.call('capabilities')
+        self.assertEqual([method for method, _ in self.peer.calls[before:]],
+                         ['initialize', 'initialized', 'account/read', 'model/list'])
+        self.assertEqual(len(self.transports), 1)
+
+        self.assertTrue(self.transports[0].closed)
+        self.assertIsNone(self.gateway.transport)
+        self.assertIsNone(self.gateway.protocol)
+        self.assertIsNone(self.gateway.budget)
+        self.assertEqual(self.peer.count('thread/start'), 0)
+        self.assertEqual(self.peer.count('turn/start'), 0)
+        self.assertEqual(self.call('threads_list'), {'threads': [], 'tasks': []})
+        self.assertEqual(len(self.transports), 1)
+
+    def test_existing_owned_thread_resumes_after_gateway_teardown_exactly_once(self):
+        thread=self.start()
+        remote=self.gateway.pipeline._mutate(lambda s:s['threads'][thread]['remote_id'])
+        self.gateway.close()
+        self.gateway=HostGateway(self.root,str(self.binary),PROJECT,lambda:self.busy,
+                                 transport_factory=self.factory)
+        self.addCleanup(self.gateway.close)
+        self.assertEqual(self.gateway.pipeline.loaded,set())
+        task=self.submit(thread)
+        self.assertEqual(task['state'],'RUNNING')
+        self.assertEqual(self.peer.count('thread/start'),1)
+        self.assertEqual(self.peer.count('thread/resume'),1)
+        self.assertEqual(self.peer.count('turn/start'),1)
+        resume=[params for method,params in self.peer.calls if method=='thread/resume'][0]
+        self.assertEqual(resume['threadId'],remote)
+        self.assertEqual(resume['model'],'offline-model')
+        self.assertEqual(resume['cwd'],str(self.workspace))
+        self.assertEqual(resume['sandbox'],'read-only')
+        self.assertEqual(resume['approvalPolicy'],'on-request')
+        self.assertEqual(resume['approvalsReviewer'],'user')
+        self.assertEqual(self.submit(thread)['id'],task['id'])
+        self.assertEqual(self.peer.count('turn/start'),1)
+        self.assertEqual(self.gateway.pipeline._mutate(lambda s:(len(s['threads']),len(s['tasks']))),(1,1))
+
+    def test_resume_scope_mismatch_is_persisted_without_native_relaunch_loop(self):
+        thread=self.start()
+        self.gateway.release_idle(force=True)  # Exercise a cold saved-context scope reply.
+        self.peer.scope='workspaceWrite'
+        task=self.submit(thread)
+        self.assertEqual(task['state'],'BLOCKED')
+        self.assertEqual(task['reason_code'],'RESUME_SCOPE_MISMATCH')
+        self.assertFalse(task['execution_started'])
+        self.assertEqual(self.peer.count('thread/start'),1)
+        self.assertEqual(self.peer.count('thread/resume'),1)
+        self.assertEqual(self.peer.count('turn/start'),0)
+        calls=len(self.peer.calls);transports=len(self.transports)
+        for _ in range(3):self.gateway.pump()
+        self.assertEqual(len(self.peer.calls),calls)
+        self.assertEqual(len(self.transports),transports)
+        self.assertEqual(self.call('threads_list')['tasks'][0]['state'],'BLOCKED')
+        self.assertTrue(self.transports[-1].closed)
+
+    def test_paused_operator_inspection_exposes_fixed_rpc_reason_without_turn_or_ledger_change(self):
+        thread=self.start()
+        self.gateway.release_idle(force=True)
+        before=self.gateway.pipeline._mutate(lambda s:json.loads(json.dumps(s)))
+        def exchange(message,timeout):
+            if message['method'] in ['thread/read','thread/resume']:
+                text=('not materialized before first user message' if message['method']=='thread/read'
+                      else 'no rollout found for thread')
+                return {'id':message['id'],'error':{'code':-32600,'message':text+' PRIVATE_SENTINEL'}}
+            return self.peer(message,timeout)
+        def factory(binary):
+            transport=FakeOwned(exchange);self.transports.append(transport);return transport
+        self.gateway.transport_factory=factory
+        with patch.object(self.gateway.pipeline,'_mutate',side_effect=AssertionError('No ledger writes')):
+            result=self.gateway.inspect_owned_thread(thread)
+        after=self.gateway.pipeline._mutate(lambda s:json.loads(json.dumps(s)))
+        self.assertEqual(before,after)
+        self.assertEqual(self.peer.count('thread/start'),1)
+        self.assertEqual(self.peer.count('turn/start'),0)
+        self.assertEqual(result['inference_calls'],0)
+        self.assertEqual(result['checks'][-1]['method'],'thread/resume')
+        self.assertEqual(result['checks'][-1]['rpc_error_code'],-32600)
+        self.assertEqual(result['checks'][-1]['reason_categories'],['NO_ROLLOUT'])
+        self.assertNotIn('PRIVATE_SENTINEL',json.dumps(result))
+        self.assertTrue(self.transports[-1].closed)
+        self.assertFalse(self.gateway.held)
+        self.assertEqual(result['cleanup_status'],'RELEASED')
+
+    def test_operator_inspection_refuses_archived_or_closing_thread(self):
+        thread=self.start()
+        self.gateway.release_idle(force=True)
+        for field in ['archived','closing']:
+            self.gateway.pipeline._mutate(lambda s:s['threads'][thread].update({field:True}))
+            with self.assertRaisesRegex(PipelineError,'OWNED_IDLE_THREAD_REQUIRED'):
+                self.gateway.inspect_owned_thread(thread)
+            self.gateway.pipeline._mutate(lambda s:s['threads'][thread].update({field:False}))
+        self.assertEqual(self.peer.count('turn/start'),0)
+
+    def test_operator_transport_construction_failure_releases_without_raw_error(self):
+        thread=self.start()
+        self.gateway.release_idle(force=True)
+        self.gateway.transport_factory=Mock(side_effect=OSError('PRIVATE_SENTINEL'))
+        result=self.gateway.inspect_owned_thread(thread)
+        self.assertEqual(result['cleanup_status'],'RELEASED')
+        self.assertEqual(result['checks'][-1]['exception_class'],'OSError')
+        self.assertNotIn('PRIVATE_SENTINEL',json.dumps(result))
+        self.assertFalse(self.gateway.held)
+        self.assertIsNone(self.gateway.budget)
+        self.assertEqual(self.peer.count('turn/start'),0)
+
+    def test_rpc_failure_receipt_is_metadata_only(self):
+        thread=self.start()
+        self.gateway.release_idle(force=True)
+        def exchange(message,timeout):
+            if message['method']=='thread/resume':
+                return {'id':message['id'],'error':{'code':-32602,'message':'no rollout found PRIVATE_SENTINEL'}}
+            return self.peer(message,timeout)
+        def factory(binary):
+            transport=FakeOwned(exchange);self.transports.append(transport);return transport
+        self.gateway.transport_factory=factory
+        from codex_app_protocol import RpcError
+        with self.assertRaises(RpcError):self.submit(thread)
+        paths=list((self.root/'logs').glob('pipeline-rpc-failure-*.json'))
+        self.assertEqual(len(paths),1)
+        data=json.loads(paths[0].read_text())
+        self.assertEqual(data['method'],'thread/resume')
+        self.assertEqual(data['rpc_error_code'],-32602)
+        self.assertEqual(data['protocol']['rpc_error_code'],-32602)
+        self.assertNotIn('PRIVATE_SENTINEL',paths[0].read_text())
+        self.assertEqual(self.peer.count('turn/start'),0)
+
+    def test_operator_inspection_requires_paused_idle_daemon_and_is_not_an_mcp_tool(self):
+        daemon=Daemon.__new__(Daemon)
+        daemon.allow_codex_pipeline=True;daemon.pipeline=Mock();daemon.children={};daemon.pending_recovery=[]
+        daemon.status=Mock(return_value={'paused':False})
+        args={'thread_id':'owned-local-thread'}
+        with self.assertRaises(ValueError):daemon.handle('codex_pipeline_inspect',args)
+        daemon.pipeline.inspect_owned_thread.assert_not_called()
+        daemon.status.return_value={'paused':True}
+        daemon.pipeline.inspect_owned_thread.return_value={'inference_calls':0}
+        self.assertEqual(daemon.handle('codex_pipeline_inspect',args),{'inference_calls':0})
+        daemon.pipeline.inspect_owned_thread.assert_called_once_with('owned-local-thread')
+        with self.assertRaises(ValueError):daemon.handle('codex_pipeline_inspect',{**args,'method':'turn/start'})
+        from mcp_adapter import tool_definitions
+        self.assertNotIn('codex_pipeline_inspect',[t['name'] for t in tool_definitions(False,True,True,True,True)])
+
+    def test_cold_resume_max_catalog_chain_fits_control_wait(self):
+        from codex_host import PIPELINE_CONTROL_TIMEOUT_SECONDS
+        thread=self.start();self.gateway.release_idle(force=True);before=len(self.peer.calls);pages=0
+        def exchange(message,timeout_s):
+            nonlocal pages
+            reply=self.peer(message,timeout_s)
+            if message['method']=='model/list':
+                pages+=1;reply['result']['nextCursor']='next-page' if pages<4 else None
+            return reply
+        def factory(binary):
+            transport=FakeOwned(exchange);self.transports.append(transport);return transport
+        self.gateway.transport_factory=factory
+        self.submit(thread)
+        methods=[method for method,_ in self.peer.calls[before:]]
+        self.assertEqual(methods,['initialize','initialized','account/read',*(['model/list']*4),
+                                  'thread/resume','turn/start'])
+        self.assertEqual(len(methods),9)
+        self.assertGreater(PIPELINE_CONTROL_TIMEOUT_SECONDS,len(methods)*10+6)
+        self.assertLess(PIPELINE_CONTROL_TIMEOUT_SECONDS,120)
 
     def test_unconfirmed_cleanup_never_reports_ready_or_releases_budget(self):
         self.gateway.transport_factory = lambda _: FakeOwned(self.peer, safe=False)
-        with self.assertRaisesRegex(PipelineError, 'EXECUTOR_CLEANUP_UNCONFIRMED'): self.start()
+        with self.assertRaisesRegex(PipelineError, 'EXECUTOR_CLEANUP_UNCONFIRMED'): self.call('capabilities')
         self.assertTrue(self.gateway.held)
         with self.assertRaises(RuntimeError): lease(self.root / 'runner.lock', shared=True)
         with self.assertRaisesRegex(PipelineError, 'EXECUTOR_CLEANUP_UNCONFIRMED'): self.call('threads_list')
@@ -129,6 +295,7 @@ class GatewayTests(unittest.TestCase):
 
     def test_actual_runner_lease_excludes_pipeline_turn(self):
         thread = self.start()
+        self.gateway.release_idle(force=True)
         with lease(self.root / 'runner.lock', shared=True):
             task = self.submit(thread)
             self.assertEqual(task['state'], 'QUEUED')
@@ -186,7 +353,7 @@ class GatewayTests(unittest.TestCase):
         proxy = DaemonPipelineProxy(self.root)
         with patch('codex_host.request', return_value={'models': []}) as req, patch('codex_host.subprocess.Popen') as spawn:
             self.assertEqual(proxy.dispatch('codex_capabilities', {}), {'models': []})
-            req.assert_called_once_with(self.root, 'codex_pipeline', {'tool': 'codex_capabilities', 'arguments': {}}, timeout=45)
+            req.assert_called_once_with(self.root, 'codex_pipeline', {'tool': 'codex_capabilities', 'arguments': {}}, timeout=110)
             with self.assertRaises(PipelineError): proxy.dispatch('command/exec', {'command': 'bad'})
             spawn.assert_not_called()
 
@@ -232,6 +399,23 @@ class GatewayTests(unittest.TestCase):
             self.assertIs(transport._spawn(), process)
         self.assertTrue(popen.call_args.kwargs['start_new_session'])
         self.assertFalse(popen.call_args.kwargs['shell'])
+
+    def test_gateway_launch_matches_proven_host_baseline_with_workspace_cwd(self):
+        process = PipeProcess(); self.addCleanup(process.cleanup)
+        transport = HostTransport(str(self.binary), str(self.workspace))
+        with patch('codex_host.subprocess.Popen', return_value=process) as popen:
+            transport._spawn()
+        self.assertEqual(popen.call_args.args[0], [str(self.binary), 'app-server', '--listen', 'stdio://'])
+        self.assertEqual(popen.call_args.kwargs['cwd'], str(self.workspace))
+        self.assertTrue(popen.call_args.kwargs['start_new_session'])
+
+    def test_shutdown_ledger_error_still_closes_executor_and_preserves_unknown(self):
+        thread = self.start(); self.submit(thread)
+        self.gateway.pipeline._mutate = Mock(side_effect=sqlite3.DatabaseError('private-ledger-detail'))
+        self.gateway.close()
+        self.assertTrue(self.transports[-1].closed)
+        self.assertEqual(json.loads((self.root / 'codex-pipeline-cleanup.json').read_text())['status'], 'UNKNOWN')
+        self.assertTrue(pipeline_held(self.root)); self.assertIsNone(self.gateway.budget)
 
     def test_reparented_same_group_child_ignoring_term_is_killed_before_release(self):
         root = {'pid': 100, 'ppid': 1, 'pgrp': 100, 'start': 'root-token', 'state': 'Z'}
