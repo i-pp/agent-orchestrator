@@ -98,6 +98,8 @@ def pipeline_held(runtime):
         db = root / 'codex-pipeline.sqlite3'
         if not db.exists() and not db.is_symlink(): return False
         _private(db, 8 * 1024**2)
+        from pipeline_policy_migration import assert_migration_ready
+        assert_migration_ready(db)
         with closing(sqlite3.connect(db.as_uri() + '?mode=ro', uri=True)) as conn:
             state = json.loads(conn.execute('SELECT body FROM ledger WHERE id=1').fetchone()[0])
         return any(t['state'] in HELD for t in state['tasks'].values())

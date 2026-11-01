@@ -317,6 +317,8 @@ class Services:
 
     def preflight(self, expected_key_file=None):
         """No stop/start, DB creation or credential reads; run before interrupting service."""
+        from pipeline_policy_migration import assert_migration_ready
+        assert_migration_ready(self.root/'codex-pipeline.sqlite3')
         from mcp_adapter import decode, fields, tool_definitions
         previous = self.read_state() or {}
         if previous.get('phase') in ['STARTING','CLEANUP_UNCONFIRMED']:

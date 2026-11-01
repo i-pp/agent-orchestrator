@@ -159,6 +159,8 @@ class Pipeline:
         self.admission = admission
         self.loaded = set()
         self.db = self.root / 'codex-pipeline.sqlite3'
+        from pipeline_policy_migration import assert_migration_ready
+        assert_migration_ready(self.db)
         if not self.db.exists():
             fd = os.open(self.db, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
             os.close(fd)
