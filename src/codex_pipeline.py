@@ -24,6 +24,8 @@ TERMINAL = {'COMPLETED', 'FAILED', 'CANCELLED'}
 HELD = {'DISPATCHING', 'RUNNING', 'WAITING_APPROVAL', 'STOP_REQUESTED', 'UNKNOWN'}
 MAX_EVENTS = 4096
 MAX_OPS = 512
+LEDGER_BYTES = 2 * 1024**2
+COMPLETION_RESERVE = 64 * 1024
 
 
 class PipelineError(ValueError):
@@ -58,7 +60,7 @@ def text(value):
 
 def validate_policy(policy):
     keys = {'schema', 'workspaces', 'models', 'max_threads', 'max_tasks', 'concurrency', 'timeout_seconds'}
-    if not isinstance(policy, dict) or set(policy) != keys or type(policy['schema']) is not int or policy['schema'] != 1:
+    if not isinstance(policy, dict) or set(policy) != keys or type(policy['schema']) is not int or policy['schema'] not in (1, 2):
         raise PipelineError('INVALID_PIPELINE_POLICY')
     for key, cap in [('max_threads', 8), ('max_tasks', 32), ('concurrency', 2), ('timeout_seconds', 300)]:
         if type(policy[key]) is not int or not 1 <= policy[key] <= cap:
@@ -92,7 +94,8 @@ def tool_definitions():
         ('chat_store', {'thread_id': ident, 'prompt': body, 'model': model, 'request_key': key}, ['thread_id', 'prompt', 'request_key'], False),
         ('chat_queue', {'task_id': ident, 'request_key': key}, ['task_id', 'request_key'], False),
         ('chat_steer', {'thread_id': ident, 'prompt': body, 'request_key': key}, ['thread_id', 'prompt', 'request_key'], False),
-        ('threads_list', {}, [], True),
+        ('threads_list', {'limit': {'type':'integer','minimum':1,'maximum':20},
+                          'cursor': {'type':'string','maxLength':80}}, [], True),
         ('task_get', {'task_id': ident}, ['task_id'], True),
         ('events', {'after': {'type': 'integer', 'minimum': 0}, 'limit': {'type': 'integer', 'minimum': 1, 'maximum': 50}}, [], True),
         ('task_cancel', {'task_id': ident, 'request_key': key}, ['task_id', 'request_key'], False),
@@ -139,8 +142,11 @@ def validate_arguments(name, args):
             if not isinstance(value, str) or not re.fullmatch(KEY, value): raise PipelineError('INVALID_KEY')
         elif key == 'model':
             if not opaque(value): raise PipelineError('INVALID_MODEL')
+        elif key == 'cursor':
+            if not isinstance(value,str) or not re.fullmatch(r'[a-f0-9]{64}:[0-9]{1,6}',value): raise PipelineError('INVALID_CURSOR')
         elif type(value) is not int or value < (1 if key == 'limit' else 0) or (key == 'limit' and value > 50):
             raise PipelineError('INVALID_PAGE')
+        elif name == 'codex_threads_list' and value > 20: raise PipelineError('INVALID_PAGE')
 
 
 class Pipeline:
@@ -198,12 +204,12 @@ class Pipeline:
             state = json.loads(conn.execute('SELECT body FROM ledger WHERE id=1').fetchone()[0])
             result = fn(state)
             raw = packed(state)
-            if len(raw.encode()) > 2 * 1024**2: raise PipelineError('LEDGER_CAPACITY')
+            if len(raw.encode()) > LEDGER_BYTES: raise PipelineError('LEDGER_CAPACITY')
             conn.execute('UPDATE ledger SET body=? WHERE id=1', (raw,))
             return result
 
     def _event(self, s, kind, thread=None, task=None, **facts):
-        if len(s['events']) >= MAX_EVENTS: raise PipelineError('EVENT_CAPACITY')
+        if self.policy['schema'] == 1 and len(s['events']) >= MAX_EVENTS: raise PipelineError('EVENT_CAPACITY')
         event = {'seq': len(s['events']) + 1, 'kind': kind, 'time': self.clock(), **facts}
         if thread: event['thread_id'] = thread
         if task: event['task_id'] = task
@@ -229,7 +235,11 @@ class Pipeline:
             if prior:
                 if prior['fingerprint'] != fingerprint: raise PipelineError('REQUEST_KEY_CONFLICT')
                 return False, prior
-            if len(s['ops']) >= MAX_OPS: raise PipelineError('OPERATION_CAPACITY')
+            if self.policy['schema'] == 1 and len(s['ops']) >= MAX_OPS: raise PipelineError('OPERATION_CAPACITY')
+            if self.policy['schema'] == 2 and len(packed(s).encode()) > LEDGER_BYTES-COMPLETION_RESERVE:
+                emergency_stop = (kind == 'cancel' and args in s['tasks']
+                    and s['tasks'][args]['state'] in HELD and not s['tasks'][args]['stop_sent']) if isinstance(args, str) else False
+                if not emergency_stop: raise PipelineError('HISTORY_STORAGE_CAPACITY')
             context = prepare(s)
             s['ops'][key] = {'fingerprint': fingerprint, 'kind': kind, 'status': 'ISSUED', 'context': context}
             self._event(s, 'operation_issued', **{'operation': kind, 'request_key_hash': digest(key)})
@@ -287,17 +297,65 @@ class Pipeline:
 
     def capabilities(self):
         available = self._catalog()
-        return {'models': [{'model': m, 'available': m in available} for m in self.policy['models']],
+        result = {'models': [{'model': m, 'available': m in available} for m in self.policy['models']],
                 'workspaces': sorted(self.policy['workspaces']),
                 'bounds': {k: self.policy[k] for k in ('max_threads', 'max_tasks', 'concurrency', 'timeout_seconds')},
                 'policy_sha256': self.common_hash, 'approval': 'notify_only', 'chat_wake': False,
                 'resident_scheduler': False, 'billing_verified': False}
+        if self.policy['schema'] == 2: result['capacity'] = self._mutate(self.capacity)
+        return result
+
+    def capacity(self, s):
+        held = [t for t in s['tasks'].values() if t['state'] in HELD]
+        threads = {t['thread_id'] for t in held}
+        return {'mode': 'cumulative_trial' if self.policy['schema'] == 1 else 'concurrent_execution',
+            'active_threads': len(threads), 'held_tasks': len(held),
+            'available_execution_slots': max(0,min(self.policy['concurrency'],self.policy['max_threads'],self.policy['max_tasks'])-len(held)),
+            'execution_slots': min(self.policy['concurrency'], self.policy['max_threads'], self.policy['max_tasks']) if self.policy['schema'] == 2 else self.policy['concurrency'],
+            'stored_threads': len(s['threads']), 'archived_threads': sum(bool(t.get('archived')) for t in s['threads'].values()),
+            'stored_tasks': len(s['tasks']), 'pending_inputs': sum(t['state'] in ('STORED','QUEUED','BLOCKED') for t in s['tasks'].values()),
+            'terminal_tasks': sum(t['state'] in TERMINAL for t in s['tasks'].values()),
+            'history_bytes': len(packed(s).encode()), 'history_byte_limit': LEDGER_BYTES,
+            'completion_reserve_bytes': COMPLETION_RESERVE if self.policy['schema'] == 2 else 0}
+
+    def room(self, s, thread_id):
+        held = [t for t in s['tasks'].values() if t['state'] in HELD]
+        if len(held) >= self.policy['concurrency']: return False
+        if self.policy['schema'] == 2:
+            threads = {t['thread_id'] for t in held}
+            if len(held) >= self.policy['max_tasks']: return False
+            if thread_id not in threads and len(threads) >= self.policy['max_threads']: return False
+        return True
+
+    def listing(self, s, args):
+        def thread_view(t):
+            return {k:v for k,v in t.items() if k not in ('remote_id','original_remote_id','native_replacements')}
+        def task_view(t):return {k:v for k,v in self._view(t).items() if k!='answer'}
+        if self.policy['schema']==1 and not args:
+            return {'threads':[thread_view(t) for t in s['threads'].values()], 'tasks':[task_view(t) for t in s['tasks'].values()]}
+        records=[]
+        for t in s['tasks'].values():
+            priority=0 if t['state'] in HELD else 2 if t['state'] not in TERMINAL else 4
+            records.append((priority,'task',t['id'],task_view(t)))
+        for t in s['threads'].values():
+            priority=1 if t.get('active_task') else 5 if t['archived'] else 3
+            records.append((priority,'thread',t['id'],thread_view(t)))
+        records.sort(key=lambda r:r[:3])
+        fingerprint=digest(records);offset=0
+        if args.get('cursor'):
+            snapshot,raw_offset=args['cursor'].split(':');offset=int(raw_offset)
+            if snapshot!=fingerprint:raise PipelineError('LIST_SNAPSHOT_CHANGED')
+            if offset>len(records):raise PipelineError('INVALID_CURSOR')
+        end=min(len(records),offset+args.get('limit',20));page=records[offset:end]
+        return {'threads':[r[3] for r in page if r[1]=='thread'], 'tasks':[r[3] for r in page if r[1]=='task'],
+            'capacity':self.capacity(s),'total_records':len(records),
+            'next_cursor':fingerprint+':'+str(end) if end<len(records) else None}
 
     def start(self, workspace, model, request_key):
         if workspace not in self.policy['workspaces']: raise PipelineError('WORKSPACE_NOT_ALLOWED')
         self._model(model)
         def prepare(s):
-            if len(s['threads']) >= self.policy['max_threads']: raise PipelineError('THREAD_CAPACITY')
+            if self.policy['schema'] == 1 and len(s['threads']) >= self.policy['max_threads']: raise PipelineError('THREAD_CAPACITY')
             ident = str(uuid.uuid4())
             s['threads'][ident] = {'id': ident, 'remote_id': None, 'workspace': workspace, 'model': model,
                                    'active_task': None, 'archived': False, 'closing': False}
@@ -414,7 +472,7 @@ class Pipeline:
             t = self._thread(s, thread_id)
             chosen = model or t['model']
             if chosen not in self.policy['models']: raise PipelineError('MODEL_NOT_ALLOWED')
-            if len(s['tasks']) >= self.policy['max_tasks']: raise PipelineError('TASK_CAPACITY')
+            if self.policy['schema'] == 1 and len(s['tasks']) >= self.policy['max_tasks']: raise PipelineError('TASK_CAPACITY')
             ident = str(uuid.uuid4())
             s['tasks'][ident] = {'id': ident, 'thread_id': thread_id, 'model': chosen, 'prompt': prompt,
                 'prompt_sha256': digest(prompt), 'state': 'QUEUED' if queue else 'STORED', 'remote_turn': None,
@@ -441,13 +499,22 @@ class Pipeline:
         return self._operation(request_key, 'queue', task_id, prepare, lambda c: c,
                                lambda s, c, _: self._view(self._task(s, c['task_id'])))
 
+    def _blocked_before_turn(self, ident, reason):
+        def block(s):
+            current = self._task(s, ident)
+            if current['state'] == 'QUEUED':
+                current.update(state='BLOCKED', reason_code=reason, execution_started=False)
+                self._event(s, 'task_blocked', current['thread_id'], ident, reason_code=reason)
+            return self._view(current)
+        return self._mutate(block)
+
     def _dispatch(self):
         def candidate(s):
             if sum(t['state'] in HELD for t in s['tasks'].values()) >= self.policy['concurrency']: return None
             pending = sorted((t for t in s['tasks'].values() if t['state'] == 'QUEUED'), key=lambda t: t['queue_seq'])
             return next((t['id'] for t in pending if not s['threads'][t['thread_id']]['active_task']
                          and not s['threads'][t['thread_id']].get('closing')
-                         and not s['threads'][t['thread_id']]['archived']), None)
+                         and not s['threads'][t['thread_id']]['archived'] and self.room(s, t['thread_id'])), None)
         ident = self._mutate(candidate)
         if not ident: return {'status': 'IDLE_OR_HELD'}
         if self.admission is not None and not self.admission(): return {'status': 'SHARED_BUDGET_HELD'}
@@ -456,6 +523,9 @@ class Pipeline:
         except PipelineError as error:return {'status':'BLOCKED','code':error.code,'task_id':ident}
         try:
             self._model(task['model'])
+        except RpcError:
+            if self.policy['schema'] == 1: raise
+            return self._blocked_before_turn(ident, 'CATALOG_REJECTED')
         except PipelineError as error:
             if error.code not in ('MODEL_NOT_AVAILABLE_OR_ALLOWED', 'SUBSCRIPTION_AUTH_REQUIRED'): raise
             def blocked(s):
@@ -469,10 +539,14 @@ class Pipeline:
         # exact owned thread, with the same fixed policy; never import by path.
         if task['thread_id'] not in self.loaded:
             thread = self._mutate(lambda s: dict(self._thread(s, task['thread_id'], idle=True)))
-            result = self.client.request('thread/resume', {'threadId': thread['remote_id'], 'excludeTurns': True,
-                'model': task['model'], 'cwd': self.policy['workspaces'][thread['workspace']],
-                'developerInstructions': self.instructions, 'approvalPolicy': 'on-request',
-                'approvalsReviewer': 'user', 'sandbox': 'read-only'})
+            try:
+                result = self.client.request('thread/resume', {'threadId': thread['remote_id'], 'excludeTurns': True,
+                    'model': task['model'], 'cwd': self.policy['workspaces'][thread['workspace']],
+                    'developerInstructions': self.instructions, 'approvalPolicy': 'on-request',
+                    'approvalsReviewer': 'user', 'sandbox': 'read-only'})
+            except RpcError:
+                if self.policy['schema'] == 1: raise
+                return self._blocked_before_turn(ident, 'RESUME_REJECTED')
             if (result.get('thread', {}).get('id') != thread['remote_id'] or result.get('model') != task['model']
                     or result.get('modelProvider') != 'openai'
                     or result.get('cwd') != self.policy['workspaces'][thread['workspace']]
@@ -493,7 +567,7 @@ class Pipeline:
             task = self._task(s, ident)
             thread = self._thread(s, task['thread_id'], idle=True)
             if task['state'] != 'QUEUED': raise PipelineError('NOT_QUEUED')
-            if sum(t['state'] in HELD for t in s['tasks'].values()) >= self.policy['concurrency']: raise PipelineError('CONCURRENCY_HELD')
+            if not self.room(s, task['thread_id']): raise PipelineError('CONCURRENCY_HELD')
             task['state'], task['deadline'] = 'DISPATCHING', self.clock() + self.policy['timeout_seconds']
             thread['active_task'] = ident
             return {'task_id': ident, 'remote_thread': thread['remote_id']}
@@ -660,9 +734,7 @@ class Pipeline:
         if name == 'codex_thread_archive': return self.archive(**a)
         if name == 'codex_task_get': return self.refresh(**a)
         if name == 'codex_threads_list':
-            return self._mutate(lambda s: {'threads': [{k: v for k, v in t.items()
-                if k not in ('remote_id','original_remote_id','native_replacements')} for t in s['threads'].values()],
-                'tasks': [{k: v for k, v in self._view(t).items() if k != 'answer'} for t in s['tasks'].values()]})
+            return self._mutate(lambda s:self.listing(s,a))
         if name == 'codex_events':
             return self._mutate(lambda s: {'events': s['events'][a.get('after', 0):a.get('after', 0)+a.get('limit', 20)],
                 'latest_cursor': len(s['events'])})

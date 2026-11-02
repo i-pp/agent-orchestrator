@@ -382,7 +382,12 @@ class HostGateway:
             # A correlated rejection of a read is not a lost connection or a
             # successful turn. Keep the task held until notification/history
             # reconciliation; never replay a turn because this read failed.
-            if method != 'thread/read': self.failed = True
+            # Normal operation keeps a valid, correlated rejection distinct
+            # from transport uncertainty. The task/operation state still holds
+            # refused stop/steer or marks a rejected start FAILED; never replay.
+            handled = {'thread/read','thread/start','turn/start','turn/steer','turn/interrupt','thread/archive',
+                       'thread/resume','account/read','model/list'}
+            if method != 'thread/read' and (self.pipeline.policy['schema'] == 1 or method not in handled): self.failed = True
             self.record_failure(method,error)
             raise
         except Exception as error:
@@ -436,13 +441,18 @@ class HostGateway:
     def dispatch(self, tool, arguments):
         validate_arguments(tool, arguments)
         remote = tool in ('codex_capabilities', 'codex_thread_start', 'codex_chat_steer', 'codex_thread_archive')
+        result = None
         if remote and not self.reserve(): raise PipelineError('SHARED_BUDGET_HELD')
         try:
             if tool == 'codex_pipeline_tick': return self.pump()
             result = self.pipeline.dispatch(tool, arguments)
             if tool == 'codex_capabilities': result.update(resident_scheduler=True, executor_owner='existing_daemon')
             return result
-        finally: self.release_idle()
+        finally:
+            self.release_idle()
+            if isinstance(result, dict) and isinstance(result.get('capacity'), dict):
+                result['capacity'].update(executor_release_confirmed=not self.held,
+                    executor_reconciliation_required=self.failed)
 
     def pump(self):
         try:
