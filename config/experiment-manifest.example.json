@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "roots": {
+    "journal": "/path/to/approved/quality-journal",
+    "report": "/path/to/approved/batch-report"
+  },
+  "runs": [
+    {
+      "id": "example-vllm-c_parse",
+      "key": "vllm-c_parse",
+      "sources": {
+        "intent": null,
+        "response": null,
+        "grading": null,
+        "candidate": null,
+        "scope": null,
+        "summary": null
+      },
+      "release": {}
+    }
+  ]
+}

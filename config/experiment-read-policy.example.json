@@ -1,0 +1,5 @@
+{
+  "schema": 1,
+  "manifest": "/path/to/private/reviewed-experiment-manifest.json",
+  "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+}

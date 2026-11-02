@@ -22,6 +22,8 @@ from workspaces import spec
 from chat_mailbox import Mailbox, MailboxError, TOOLS as MAILBOX_TOOLS, validate_arguments as mailbox_arguments
 from codex_pipeline import (TOOLS as PIPELINE_TOOLS, PipelineError,
                             tool_definitions as pipeline_tools, validate_arguments as pipeline_arguments)
+from experiments import (TOOLS as EXPERIMENT_TOOLS, EvidenceError, ExperimentStore,
+                         tool_definitions as experiment_tools, validate_arguments as experiment_arguments)
 
 PROJECT = Path(__file__).resolve().parents[1]
 PROTOCOL = '2025-11-25'
@@ -109,7 +111,7 @@ def task_view(task):
     return result
 
 
-def tool_definitions(writes=False, local_llm=False, local_models=False, chat_mailbox=False, codex_pipeline=False):
+def tool_definitions(writes=False, local_llm=False, local_models=False, chat_mailbox=False, codex_pipeline=False, experiments=False):
     identifier = {'type': 'string', 'pattern': UUID_PATTERN, 'maxLength': 36}
     def tool(name, description, properties, required=(), read=True):
         return {'name': name, 'description': description,
@@ -174,17 +176,23 @@ def tool_definitions(writes=False, local_llm=False, local_models=False, chat_mai
             definition['outputSchema'] = {'type': 'object', 'properties': {'call_id': identifier, 'data': {'type': 'object'}},
                                          'required': ['call_id', 'data'], 'additionalProperties': False}
             result.append(definition)
+    if experiments:
+        for definition in experiment_tools():
+            definition['outputSchema'] = {'type': 'object', 'properties': {'call_id': identifier, 'data': {'type': 'object'}},
+                'required': ['call_id', 'data'], 'additionalProperties': False}
+            result.append(definition)
     return result
 
 
 class Adapter:
     def __init__(self, root, allow_writes=False, allow_local_llm=False, allow_local_models=False, allow_chat_mailbox=False, allow_mailbox_grants=False,
-                 allow_codex_pipeline=False, pipeline=None):
+                 allow_codex_pipeline=False, pipeline=None, allow_experiments=False):
         self.root = runtime_path(root)
         if pipeline is not None and not allow_codex_pipeline: raise ValueError('Pipeline activation is explicit')
         if allow_codex_pipeline and pipeline is None: raise ValueError('Pipeline executor must be explicitly connected')
         self.pipeline = pipeline
-        self.tools = tool_definitions(allow_writes, allow_local_llm, allow_local_models, allow_chat_mailbox, allow_codex_pipeline)
+        self.tools = tool_definitions(allow_writes, allow_local_llm, allow_local_models, allow_chat_mailbox, allow_codex_pipeline, allow_experiments)
+        self.experiments = ExperimentStore.from_runtime(self.root) if allow_experiments else None
         self.mailbox = Mailbox(self.root) if allow_chat_mailbox else None
         self.grant = None
         if allow_mailbox_grants:
@@ -254,6 +262,9 @@ class Adapter:
     def call_tool(self, name, arguments, rpc_id):
         if name not in {t['name'] for t in self.tools}: raise Invalid('Tool is not enabled')
         if name == 'orchestrator_status': fields(arguments, [])
+        elif name in EXPERIMENT_TOOLS:
+            try: experiment_arguments(name, arguments)
+            except EvidenceError as exc: raise Invalid(exc.code) from None
         elif name in PIPELINE_TOOLS:
             try: pipeline_arguments(name, arguments)
             except PipelineError as exc: raise Invalid(exc.code) from None
@@ -305,6 +316,16 @@ class Adapter:
         if self.audit.tell() > AUDIT_LIMIT - 4096: raise OSError('Audit capacity reached')
         self.record('begin', **facts)
         try:
+            if name in EXPERIMENT_TOOLS:
+                try:
+                    data = self.experiments.dispatch(name, arguments)
+                    failed = False
+                except (EvidenceError, OSError, TypeError, KeyError, UnicodeError):
+                    data, failed = {'status': 'UNVERIFIED', 'code': 'EVIDENCE_UNAVAILABLE_OR_INVALID'}, True
+                self.record('end', outcome='error_or_uncertain' if failed else 'returned', **facts)
+                content = {'call_id': call_id, 'data': data}
+                return {'content': [{'type': 'text', 'text': json.dumps(content)}],
+                        'structuredContent': content, 'isError': failed}
             if name in PIPELINE_TOOLS:
                 try:
                     data = self.pipeline.dispatch(name, arguments)
@@ -563,6 +584,8 @@ def main():
                         help='Explicit finite workstream grant; requires mailbox and private grant policy, default off')
     parser.add_argument('--allow-codex-pipeline', action='store_true',
                         help='Separately approved app-server executor; requires private fixed policy, default off')
+    parser.add_argument('--allow-experiments', action='store_true',
+                        help='Read-only pinned experiment projections; requires private experiment-read-policy.json, default off')
     args = parser.parse_args()
     os.umask(0o077)
     pipeline = None
@@ -571,7 +594,8 @@ def main():
             from codex_host import DaemonPipelineProxy
             pipeline = DaemonPipelineProxy(runtime_path(args.runtime))
         return serve(Adapter(args.runtime, args.allow_writes, args.allow_local_llm, args.allow_local_models,
-                             args.allow_chat_mailbox, args.allow_mailbox_grants, args.allow_codex_pipeline, pipeline))
+                             args.allow_chat_mailbox, args.allow_mailbox_grants, args.allow_codex_pipeline, pipeline,
+                             allow_experiments=args.allow_experiments))
     except (OSError, ValueError, TypeError, sqlite3.Error):
         print('Adapter startup refused: verify private runtime and operator policy.', file=sys.stderr)
         return 1

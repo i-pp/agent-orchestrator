@@ -68,11 +68,12 @@ def credential_metadata(path):
 
 
 class Services:
-    def __init__(self, runtime=RUNTIME, codex=CODEX, key_file=KEY, allow_local_llm=False, allow_local_models=False, allow_chat_mailbox=False, allow_mailbox_grants=False, allow_codex_pipeline=False):
+    def __init__(self, runtime=RUNTIME, codex=CODEX, key_file=KEY, allow_local_llm=False, allow_local_models=False, allow_chat_mailbox=False, allow_mailbox_grants=False, allow_codex_pipeline=False, allow_experiments=False):
         if allow_mailbox_grants and not allow_chat_mailbox:
             raise Refused('Mailbox grants require the chat mailbox capability')
         if type(allow_codex_pipeline) is not bool:
             raise Refused('Pipeline capability flag must be boolean')
+        if type(allow_experiments) is not bool: raise Refused('Experiment flag must be boolean')
         self.root = Path(runtime).expanduser().absolute()
         if (self.root.parent != PROJECT/'.runtime' or not re.fullmatch(r'development-poc-[A-Za-z0-9_-]{1,80}', self.root.name)
                 or any(p.is_symlink() for p in [self.root, *self.root.parents])):
@@ -94,6 +95,7 @@ class Services:
         self.allow_chat_mailbox = allow_chat_mailbox
         self.allow_mailbox_grants = allow_mailbox_grants
         self.allow_codex_pipeline = allow_codex_pipeline
+        self.allow_experiments = allow_experiments
 
     def pipeline_snapshot(self, expected=None):
         """Read fixed executor/policy metadata; no executor or auth startup."""
@@ -169,6 +171,11 @@ class Services:
                 or value.get('phase') not in ['STARTING', 'READY', 'STOPPED', 'FAILED', 'CLEANUP_UNCONFIRMED']
                 or type(value.get('mailbox_grants_enabled', False)) is not bool
                 or type(value.get('codex_pipeline_enabled', False)) is not bool
+                or type(value.get('experiments_enabled', False)) is not bool
+                or (value.get('experiments_enabled', False) and (
+                    not isinstance(value.get('experiment_read_snapshot'), dict)
+                    or set(value['experiment_read_snapshot']) != {'read_policy_sha256','manifest_sha256'}
+                    or any(not isinstance(v,str) or not re.fullmatch('[a-f0-9]{64}',v) for v in value['experiment_read_snapshot'].values())))
                 or (value.get('codex_pipeline_enabled', False) and (
                     not isinstance(value.get('codex_pipeline_snapshot'), dict)
                     or set(value['codex_pipeline_snapshot']) != {'executor_policy_sha256', 'pipeline_policy_sha256', 'common_policy_sha256', 'binary_sha256'}
@@ -230,7 +237,8 @@ class Services:
                              *(['--allow-local-models'] if getattr(self, 'allow_local_models', False) else []),
                              *(['--allow-chat-mailbox'] if getattr(self, 'allow_chat_mailbox', False) else []),
                              *(['--allow-mailbox-grants'] if getattr(self, 'allow_mailbox_grants', False) else []),
-                             *(['--allow-codex-pipeline'] if getattr(self, 'allow_codex_pipeline', False) else [])])
+                             *(['--allow-codex-pipeline'] if getattr(self, 'allow_codex_pipeline', False) else []),
+                             *(['--allow-experiments'] if getattr(self, 'allow_experiments', False) else [])])
         tunnel = [str(self.client), 'run', '--profile-file', str(PROJECT/'systemd/aceis-mcp-tunnel.yaml'),
                   '--control-plane.base-url=https://api.openai.com',
                   '--control-plane.tunnel-id=tunnel_6ae1d745be7c8191b6d502b613317b4c',
@@ -253,7 +261,7 @@ class Services:
                               "('QUEUED','RUNNING','VERIFYING','UNKNOWN','WAITING_FOR_HUMAN')").fetchone()[0]:
                     raise Refused('Unresolved work requires reconciliation before service interruption')
 
-    def recovery_plan(self, rollback_mailbox=False, rollback_grants=False, rollback_pipeline=False):
+    def recovery_plan(self, rollback_mailbox=False, rollback_grants=False, rollback_pipeline=False, rollback_experiments=False):
         """Return existing CLI argument arrays from recorded configuration, without applying them."""
         with self.locked():
             state = self.read_state()
@@ -293,14 +301,16 @@ class Services:
                                    state['local_llm_enabled'],state['local_models_enabled'],
                                    False if rollback_mailbox else state['chat_mailbox_enabled'],
                                    False if rollback_mailbox or rollback_grants else state.get('mailbox_grants_enabled',False),
-                                   allow_codex_pipeline=False if rollback_pipeline else state.get('codex_pipeline_enabled',False))
+                                   allow_codex_pipeline=False if rollback_pipeline else state.get('codex_pipeline_enabled',False),
+                                   allow_experiments=False if rollback_experiments else state.get('experiments_enabled',False))
             checked = candidate.preflight(references[0])
             flags = [flag for enabled,flag in [
                 (candidate.allow_local_llm,'--allow-local-llm'),
                 (candidate.allow_local_models,'--allow-local-models'),
                 (candidate.allow_chat_mailbox,'--allow-chat-mailbox'),
                 (candidate.allow_mailbox_grants,'--allow-mailbox-grants'),
-                (candidate.allow_codex_pipeline,'--allow-codex-pipeline')] if enabled]
+                (candidate.allow_codex_pipeline,'--allow-codex-pipeline'),
+                (candidate.allow_experiments,'--allow-experiments')] if enabled]
             base = ['/usr/bin/python3','-B',str(PROJECT/'scripts/poc_services.py')]
             common = ['--runtime',str(candidate.root),'--key-file',str(candidate.key),
                       '--codex',str(candidate.codex)]
@@ -309,7 +319,7 @@ class Services:
                 'stop':base+['stop',*common,'--apply'],
                 'start':base+['start',*common,*flags,'--apply'],
                 'status':base+['status',*common]}
-            return {'operation':'rollback-plan' if rollback_mailbox else ('grant-rollback-plan' if rollback_grants else ('pipeline-rollback-plan' if rollback_pipeline else 'resume-plan')),
+            return {'operation':'experiment-rollback-plan' if rollback_experiments else ('rollback-plan' if rollback_mailbox else ('grant-rollback-plan' if rollback_grants else ('pipeline-rollback-plan' if rollback_pipeline else 'resume-plan'))),
                     'automatic_apply':False,'revalidate_before_apply':True,
                     'state_sha256':hashlib.sha256((self.root/STATE).read_bytes()).hexdigest(),
                     'observed_units':observed,'preflight':checked,'commands':commands,
@@ -339,6 +349,12 @@ class Services:
         if not (PROJECT/'systemd/aceis-mcp-tunnel.yaml').is_file(): raise Refused('Tunnel profile is missing')
         self.require_idle_database()
         pipeline_hashes = None
+        experiment_hashes = None
+        if getattr(self, 'allow_experiments', False):
+            from experiments import experiment_snapshot
+            experiment_hashes = experiment_snapshot(self.root)
+            if previous.get('experiments_enabled',False) and previous['experiment_read_snapshot'] != experiment_hashes:
+                raise Refused('Experiment read scope differs from the approved invocation')
         if getattr(self, 'allow_codex_pipeline', False):
             expected_snapshot = previous.get('codex_pipeline_snapshot') if previous.get('codex_pipeline_enabled', False) else None
             pipeline_hashes = self.pipeline_snapshot(expected_snapshot)
@@ -383,7 +399,8 @@ class Services:
                                 ('allow_local_models','--allow-local-models'),
                                 ('allow_chat_mailbox','--allow-chat-mailbox'),
                                 ('allow_mailbox_grants','--allow-mailbox-grants'),
-                                ('allow_codex_pipeline','--allow-codex-pipeline')]:
+                                ('allow_codex_pipeline','--allow-codex-pipeline'),
+                                ('allow_experiments','--allow-experiments')]:
             if adapter.count(flag) != int(getattr(self,attribute,False)):
                 raise Refused('Adapter capability argument was not inherited')
         if commands['daemon'].count('--allow-codex-pipeline') != int(getattr(self, 'allow_codex_pipeline', False)):
@@ -393,7 +410,9 @@ class Services:
                 'credential_file_reference':key['path'],'credential_mode':key['mode'],
                 'credential_contents_read':False,'tool_names':[t['name'] for t in tool_definitions(
                     False,self.allow_local_llm,self.allow_local_models,self.allow_chat_mailbox,
-                    getattr(self,'allow_codex_pipeline',False))],
+                    getattr(self,'allow_codex_pipeline',False),getattr(self,'allow_experiments',False))],
+                'experiments_enabled':getattr(self,'allow_experiments',False),
+                'experiment_read_snapshot':experiment_hashes,
                 'codex_pipeline_enabled':getattr(self,'allow_codex_pipeline',False),
                 'codex_pipeline_snapshot':pipeline_hashes,
                 'mailbox_policy_sha256':policy_hash,'mailbox_allowed_slots':slots,
@@ -485,6 +504,8 @@ class Services:
                      'codex_pipeline_enabled': getattr(self,'allow_codex_pipeline',False)}
             if state['codex_pipeline_enabled']:
                 state['codex_pipeline_snapshot'] = checked['codex_pipeline_snapshot']
+            if getattr(self,'allow_experiments',False):
+                state.update(experiments_enabled=True,experiment_read_snapshot=checked['experiment_read_snapshot'])
             state.update(credential_file_reference=str(self.key),codex_file_reference=str(self.codex))
             self.write_state(state)
             try:
@@ -534,7 +555,7 @@ class Services:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('operation', choices=['plan', 'resume-plan', 'rollback-plan', 'grant-rollback-plan', 'pipeline-rollback-plan', 'preflight', 'start', 'status', 'stop'])
+    parser.add_argument('operation', choices=['plan', 'resume-plan', 'rollback-plan', 'grant-rollback-plan', 'pipeline-rollback-plan', 'experiment-rollback-plan', 'preflight', 'start', 'status', 'stop'])
     parser.add_argument('--runtime', type=Path, default=RUNTIME)
     parser.add_argument('--codex', type=Path, default=CODEX)
     parser.add_argument('--key-file', type=Path, default=KEY)
@@ -551,6 +572,7 @@ def main():
                         help='Separately approved bounded workstream grant; requires --allow-chat-mailbox; default off')
     parser.add_argument('--allow-codex-pipeline', action='store_true',
                         help='Separately approved bounded Codex pipeline; default off')
+    parser.add_argument('--allow-experiments', action='store_true', help='Separately approved pinned read-only experiments; default off')
     args = parser.parse_args()
     if args.operation in ['start', 'stop'] and not args.apply:
         parser.error('start/stop require --apply after operator approval')
@@ -558,6 +580,7 @@ def main():
     try:
         options = {'allow_mailbox_grants':True} if args.allow_mailbox_grants else {}
         if args.allow_codex_pipeline: options['allow_codex_pipeline'] = True
+        if args.allow_experiments: options['allow_experiments'] = True
         services = Services(args.runtime, args.codex, args.key_file, args.allow_local_llm, args.allow_local_models, args.allow_chat_mailbox, **options)
         if args.operation in ['resume-plan','rollback-plan']:
             result = services.recovery_plan(args.operation == 'rollback-plan')
@@ -565,6 +588,8 @@ def main():
             result = services.recovery_plan(rollback_grants=True)
         elif args.operation == 'pipeline-rollback-plan':
             result = services.recovery_plan(rollback_pipeline=True)
+        elif args.operation == 'experiment-rollback-plan':
+            result = services.recovery_plan(rollback_experiments=True)
         elif args.operation == 'preflight':
             result = services.preflight(args.expected_key_file)
         else:

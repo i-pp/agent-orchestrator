@@ -48,6 +48,12 @@ def snapshot(manager):
         if hashes!=state.get('codex_pipeline_snapshot'):
             raise LoginBlocked('PIPELINE_EXECUTOR_PIN_MISMATCH')
         data.update(codex_pipeline_enabled=True,codex_pipeline_snapshot=hashes)
+    if type(state.get('experiments_enabled',False)) is not bool: raise LoginBlocked('INVOCATION_SCOPE_CHANGED')
+    if state.get('experiments_enabled',False):
+        from experiments import experiment_snapshot
+        hashes=experiment_snapshot(manager.root)
+        if hashes!=state.get('experiment_read_snapshot'):raise LoginBlocked('EXPERIMENT_READ_PIN_MISMATCH')
+        data.update(experiments_enabled=True,experiment_read_snapshot=hashes)
     # OFF deliberately contributes no new bytes to existing eleven-tool pins.
     pin=hashlib.sha256(json.dumps(data,sort_keys=True,separators=(',',':')).encode()).hexdigest()
     return state,data,pin
@@ -57,7 +63,8 @@ def configured(runtime):
     manager=Services(runtime=runtime);state,_,_=snapshot(manager)
     return Services(manager.root,Path(state['codex_file_reference']),Path(state['credential_file_reference']),
                     *[state[k] for k in FLAGS],
-                    **({'allow_codex_pipeline':True} if state.get(PIPELINE_FLAG,False) else {}))
+                    **({'allow_codex_pipeline':True} if state.get(PIPELINE_FLAG,False) else {}),
+                    **({'allow_experiments':True} if state.get('experiments_enabled',False) else {}))
 
 
 def unit_name(manager):return manager.units['daemon'].removesuffix('-daemon.service')+'-login.service'
@@ -120,10 +127,12 @@ def restore(manager,expected_pin):
             raise LoginBlocked('EXISTING_HEALTH_LOCATOR_REQUIRES_RECONCILIATION')
         checked=manager.preflight(Path(state['credential_file_reference']))
         enabled=state.get(PIPELINE_FLAG,False)
-        if not checked['passed'] or len(checked['tool_names'])!=(23 if enabled else 11):
+        if not checked['passed'] or len(checked['tool_names'])!=((23 if enabled else 11)+(4 if state.get('experiments_enabled',False) else 0)):
             raise LoginBlocked('APPROVED_PIPELINE_TOOLS_NOT_CONFIRMED' if enabled else 'APPROVED_ELEVEN_TOOLS_NOT_CONFIRMED')
         if enabled and checked.get('codex_pipeline_snapshot')!=state['codex_pipeline_snapshot']:
             raise LoginBlocked('PIPELINE_EXECUTOR_PIN_MISMATCH')
+        if state.get('experiments_enabled',False) and checked.get('experiment_read_snapshot')!=state['experiment_read_snapshot']:
+            raise LoginBlocked('EXPERIMENT_READ_PIN_MISMATCH')
         # Only reconcile a lost manager's state; no stop(), file deletion, or
         # policy/ledger mutation. start() rechecks idle work under the same lock.
         if state['phase']=='READY':
