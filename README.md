@@ -19,7 +19,7 @@ python3 -B src/runner.py --help
 python3 -m unittest discover -s tests -v
 ```
 
-The [runner how-to](docs/how-to/run-task.md) demonstrates a read-only flow: check a fresh runtime, create a fixture, queue a task, then inspect its state. Review-time help commands and `policy_context inspect` passed against hash-verified GitHub API-materialized working trees at the exact PR head and pinned policy commit. Fixture creation, queue-only `submit`, and `show` passed against a source snapshot whose runtime blobs match this PR head. `check` returned `BLOCKED` in this Codex sandbox (`executed=false`), and live `run` was not attempted. The [testing guide](docs/testing.md#review-time-validation) records provenance and limits; follow-up issue [#2](https://github.com/i-pp/agent-orchestrator/issues/2) tracks canonical-origin verification and live execution.
+The [runner how-to](docs/how-to/run-task.md) demonstrates a read-only flow: check a fresh runtime, create a fixture, queue a task, then inspect its state. Review-time help commands and `policy_context inspect` passed against hash-verified GitHub API-materialized working trees at the reviewed PR code head and pinned policy commit; subsequent commits changed documentation only. Fixture creation, queue-only `submit`, and `show` passed against a source snapshot whose runtime blobs match the current PR head. `check` at the reviewed code head returned `BLOCKED` in this Codex sandbox (`executed=false`), and live `run` was not attempted. The [testing guide](docs/testing.md#review-time-validation) records provenance and limits; follow-up issue [#2](https://github.com/i-pp/agent-orchestrator/issues/2) tracks canonical-origin verification and live execution.
 
 ## Advanced Usage
 
