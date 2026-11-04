@@ -2,7 +2,7 @@
 
 ## 概要
 
-専用workspaceでCodex CLIタスクを管理するPythonランナーと、任意で使うユーザーdaemonです。タスク状態を記録し、検証・復旧確認と制御された並列実行を行います。ローカルMCP stdioアダプターも利用できます。
+Agent Orchestratorは、Codexの実行と成果の検証、安全に再開できるかの判断を分けて記録するツールです。実行・受入証跡・復旧判断・人のレビューを別々に管理し、不確かな作業を無条件に再実行しないよう支援します。専用workspaceでCodex CLIタスクを扱うPython runnerと任意のuser daemon、ローカルMCP stdioアダプターを提供します。
 
 > **状態: 実験的。** 通常のsystemd導入は、現在のホストでAppArmorがnamespace作成を拒否するため未完了です。別の開発用PoCには専用の証拠と制限があります。mailboxのend-to-endアクセス、書込み承認、parent-dotによる回答回収は、完全には検証されていません。単体テストの成功だけでは本番利用可能とは判断できません。
 
@@ -17,7 +17,7 @@ python3 -B src/runner.py --help
 python3 -m unittest discover -s tests -v
 ```
 
-基本的なタスク実行例は[runnerの手順](docs/how-to/run-task.md)を参照してください。単体テストはfixtureを使い、実Codex検査とは別です。実Codex検査は既存サブスクリプション枠を消費し、専用runtimeを作成する場合があります。実行前に[テスト手順](docs/testing.md)を確認してください。
+基本的な流れは、新しいruntimeをcheckし、fixtureを用意してtaskをsubmitし、run後に状態をshowで確認することです。[runnerの手順](docs/how-to/run-task.md)にread-onlyの例があります。このPR headでは、GitHubのDNS解決に失敗し実行環境も利用できなくなったため、How-toのコマンドは未実行です。liveな`run`も未実行で、既存サブスクリプション枠を使う可能性があります。[検証記録](docs/testing.md#review-time-validation)と[Issue #2](https://github.com/i-pp/agent-orchestrator/issues/2)を参照してください。
 
 ## 発展的な使い方
 

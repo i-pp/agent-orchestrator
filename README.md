@@ -2,7 +2,7 @@
 
 ## Overview
 
-A Python runner and optional user daemon for supervising Codex CLI tasks in dedicated workspaces. It records task state, applies verification and recovery checks, and supports controlled parallel execution. A local MCP stdio adapter is available.
+Agent Orchestrator helps operators distinguish running a Codex task from verifying its result and deciding whether it is safe to resume. It records execution, acceptance evidence, recovery decisions, and human review separately, so uncertain work is not blindly retried. It provides a Python runner and optional user daemon for Codex CLI tasks in dedicated workspaces, plus a local MCP stdio adapter.
 
 > **Status: experimental.** Standard systemd deployment remains blocked by the current host's AppArmor namespace restriction. The separate development PoC has its own evidence and limits. End-to-end mailbox access, write approval, and parent-dot retrieval are not fully verified; passing unit tests do not establish production readiness.
 
@@ -17,7 +17,7 @@ python3 -B src/runner.py --help
 python3 -m unittest discover -s tests -v
 ```
 
-For an example basic task flow, see the [runner how-to](docs/how-to/run-task.md). Its commands have not been executed against this PR head. The unit suite uses fixtures and is separate from live Codex checks. Live checks may consume the user's existing subscription and create a dedicated runtime; read the [testing guide](docs/testing.md) before running them.
+A typical flow is to check a fresh runtime, prepare a fixture, submit a task, run it, and inspect its state. The [runner how-to](docs/how-to/run-task.md) shows a read-only example. Its commands have not been executed against this PR head because a checkout could not be obtained: GitHub DNS resolution failed and the execution environment became unavailable. The live `run` step was not attempted and may consume subscription allowance. See the [review-time validation note](docs/testing.md#review-time-validation) and [follow-up issue #2](https://github.com/i-pp/agent-orchestrator/issues/2).
 
 ## Advanced Usage
 
