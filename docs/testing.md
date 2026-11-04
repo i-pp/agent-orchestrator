@@ -40,7 +40,6 @@ python3 -B tests/live_phase2_e3_2.py --execute
 - See the [phase report index](phase-reports.md) for the historical test and design records.
 - Preserve historical counts and failed or blocked results in their phase reports.
 
-
 ## Review-time validation
 
 ### Source and environment
