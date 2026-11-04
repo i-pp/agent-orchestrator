@@ -1,0 +1,68 @@
+name: Documentation CI
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".markdownlint-cli2.jsonc"
+      - "README.md"
+      - "README_jp.md"
+      - "docs/**"
+      - ".agents/skills/**"
+      - "scripts/check_markdown_links.py"
+      - ".github/workflows/documentation-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - ".markdownlint-cli2.jsonc"
+      - "README.md"
+      - "README_jp.md"
+      - "docs/**"
+      - ".agents/skills/**"
+      - "scripts/check_markdown_links.py"
+      - ".github/workflows/documentation-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  docs:
+    name: Markdown lint and internal links
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "26.13.0"
+      - name: Select current entry points and changed Markdown files
+        id: markdown
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          CURRENT_SHA: ${{ github.sha }}
+        run: |
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            range="$PR_BASE_SHA...$CURRENT_SHA"
+          else
+            range="$PUSH_BEFORE_SHA..$CURRENT_SHA"
+          fi
+          git diff --name-only --diff-filter=ACMR "$range" -- '*.md' '*.markdown' > "$RUNNER_TEMP/changed-markdown.txt"
+      - name: Lint maintained entry points and changed Markdown
+        run: |
+          mapfile -t changed < "$RUNNER_TEMP/changed-markdown.txt"
+          targets=(README.md README_jp.md docs/how-to/run-task.md docs/phase-reports.md docs/readme-migration.md docs/testing.md)
+          for file in "${changed[@]}"; do
+            if [[ -f "$file" ]]; then
+              targets+=("$file")
+            fi
+          done
+          mapfile -t targets < <(printf '%s\n' "${targets[@]}" | awk '!seen[$0]++')
+          npx --yes --package=markdownlint-cli2@0.23.3 markdownlint-cli2 "${targets[@]}"
+      - name: Check repository-local Markdown links
+        run: python3 scripts/check_markdown_links.py
