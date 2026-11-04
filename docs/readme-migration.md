@@ -7,6 +7,7 @@ This record describes the information audit for the README rewrite. It does not 
 - Repository: `i-pp/agent-orchestrator`
 - `main` revision inspected: `1468c0abb06e0b36ad92a7f041d5305aab688947`
 - Original README: 459 lines and 34,389 UTF-8 bytes, primarily Japanese.
+- Revised README: 32 lines and 2,668 UTF-8 bytes in English; the new Japanese translation is 32 lines and 2,941 bytes.
 - There was no `README_jp.md` or open PR at inspection time.
 
 ## Content map
@@ -33,3 +34,9 @@ The original README referenced `systemd/aceis-mcp-tunnel.service` and `systemd/a
 The original overview presented mailbox request/answer and retrieval as confirmed, while a later section marked ChatGPT access, write approval, and parent-dot retrieval unverified. The rewritten status uses the narrower statement and keeps the standard systemd AppArmor blocker separate from the development PoC evidence.
 
 The README rewrite does not remove runtime code, configuration, phase reports, or design documents. Detailed procedures remain in their mapped destinations; the exact former README remains available in Git history.
+
+## Concrete README changes and validation limits
+
+The English entry point now follows the Overview / Installation / Usage / Advanced Usage / Documentation structure, while the new Japanese page translates its scope, environment, status, and navigation. The old README was reduced from 459 lines to 32; the command-heavy operational detail is linked from dedicated guides and phase reports instead of being repeated in the landing page. The systemd/AppArmor blocker and the separate development PoC remain explicit.
+
+The PR review verified referenced paths against the repository tree and checked the translated status statement for semantic alignment. The task commands were not executed against the PR head because no local checkout was available. No CI status checks or workflow runs were present at review time; a follow-up issue tracks repeatable CI and command validation.

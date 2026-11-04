@@ -17,7 +17,7 @@ python3 -B src/runner.py --help
 python3 -m unittest discover -s tests -v
 ```
 
-For a verified basic task flow, see the [runner how-to](docs/how-to/run-task.md). The unit suite uses fixtures and is separate from live Codex checks. Live checks may consume the user's existing subscription and create a dedicated runtime; read the [testing guide](docs/testing.md) before running them.
+For an example basic task flow, see the [runner how-to](docs/how-to/run-task.md). Its commands have not been executed against this PR head. The unit suite uses fixtures and is separate from live Codex checks. Live checks may consume the user's existing subscription and create a dedicated runtime; read the [testing guide](docs/testing.md) before running them.
 
 ## Advanced Usage
 

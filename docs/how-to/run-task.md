@@ -5,7 +5,7 @@ This how-to runs a read-only fixture task in the existing shared workspace. Run 
 ## Prerequisites
 
 - The documented Linux environment and existing Codex CLI setup are available; see the [README](../../README.md#installation).
-- The default runtime has passed `check`.
+- The documented Linux environment and existing Codex CLI setup are available; this procedure runs `check` before submitting the task.
 - The acceptance fixture is tracked at `examples/read-fixture.acceptance.json`.
 
 ## Procedure
