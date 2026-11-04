@@ -10,6 +10,8 @@ Agent Orchestrator helps operators distinguish running a Codex task from verifyi
 
 There is no Python package installer; the Python code uses the standard library. The documented environment requires Linux, Python 3.14, an existing Codex CLI and file-auth setup, `unshare`, `mount`, `setpriv`, `bwrap`, and cgroup v2 through a delegated systemd user manager. The reported verification host is Ubuntu 26.04.1 with Python 3.14.4 and `codex-cli 0.164.0-alpha.11.1`. Other operating systems, CLI versions, and keyring authentication are unverified. See the [systemd deployment gate](docs/systemd-deployment.md) and [PoC service setup](docs/poc-services.md).
 
+Before `run`, configure the operator-managed common-policy checkout. `config/upstream-policy.json` pins commit `aeef6db1cc9680833277f76962044da0dae501b9`; the default checkout path is `../ai-orchestration` relative to the repository root. Verify the selected checkout and pin with `python3 -B scripts/policy_context.py --format inspect`. See [common-policy setup](docs/common-policy.md) for path overrides and integrity requirements.
+
 ## Usage
 
 ```bash
@@ -17,7 +19,7 @@ python3 -B src/runner.py --help
 python3 -m unittest discover -s tests -v
 ```
 
-A typical flow is to check a fresh runtime, prepare a fixture, submit a task, run it, and inspect its state. The [runner how-to](docs/how-to/run-task.md) shows a read-only example. Its commands have not been executed against this PR head because a checkout could not be obtained: GitHub DNS resolution failed and the execution environment became unavailable. The live `run` step was not attempted and may consume subscription allowance. See the [review-time validation note](docs/testing.md#review-time-validation) and [follow-up issue #2](https://github.com/i-pp/agent-orchestrator/issues/2).
+The [runner how-to](docs/how-to/run-task.md) demonstrates a read-only flow: check a fresh runtime, create a fixture, queue a task, then inspect its state. Review-time help, fixture, queue-only `submit`, and `show` checks passed against a GitHub API source snapshot of the runner; `check` returned `BLOCKED` in this Codex sandbox (`executed=false`), and live `run` was not attempted. The exact scope and the failed local checkout attempt are recorded in the [testing guide](docs/testing.md#review-time-validation). Follow-up issue [#2](https://github.com/i-pp/agent-orchestrator/issues/2) tracks validation with a local checkout and the pinned policy source.
 
 ## Advanced Usage
 

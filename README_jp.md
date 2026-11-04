@@ -10,6 +10,8 @@ Agent Orchestratorは、Codexの実行と成果の検証、安全に再開でき
 
 Pythonパッケージとしてのインストーラーはなく、Pythonコードは標準ライブラリを使用します。文書に記載された環境にはLinux、Python 3.14、既存のCodex CLI／ファイル認証設定、`unshare`、`mount`、`setpriv`、`bwrap`、委譲されたsystemd user manager経由のcgroup v2が必要です。報告に記載された検証環境はUbuntu 26.04.1、Python 3.14.4、`codex-cli 0.164.0-alpha.11.1`です。他のOS／CLIバージョンとkeyring認証は未検証です。[systemd導入条件](docs/systemd-deployment.md)と[PoCサービス設定](docs/poc-services.md)を参照してください。
 
+`run`の前に、operator管理の共通policy checkoutを設定してください。`config/upstream-policy.json`はcommit `aeef6db1cc9680833277f76962044da0dae501b9`を固定しており、既定の配置先はrepository root基準の`../ai-orchestration`です。選択したcheckoutとpinは `python3 -B scripts/policy_context.py --format inspect` で確認します。path overrideと整合性条件は[共通policyの設定](docs/common-policy.md)を参照してください。
+
 ## 使い方
 
 ```bash
@@ -17,7 +19,7 @@ python3 -B src/runner.py --help
 python3 -m unittest discover -s tests -v
 ```
 
-基本的な流れは、新しいruntimeをcheckし、fixtureを用意してtaskをsubmitし、run後に状態をshowで確認することです。[runnerの手順](docs/how-to/run-task.md)にread-onlyの例があります。このPR headでは、GitHubのDNS解決に失敗し実行環境も利用できなくなったため、How-toのコマンドは未実行です。liveな`run`も未実行で、既存サブスクリプション枠を使う可能性があります。[検証記録](docs/testing.md#review-time-validation)と[Issue #2](https://github.com/i-pp/agent-orchestrator/issues/2)を参照してください。
+[runnerの手順](docs/how-to/run-task.md)は、read-onlyの流れとしてruntime確認、fixture作成、taskのqueue登録、状態確認を案内します。レビュー時にrunnerのhelp、fixture作成、queue専用の`submit`と`show`は、GitHub APIから取得したrunnerソースsnapshotで成功しました。`check`はこのCodex sandbox内で`BLOCKED`（`executed=false`）となり、liveな`run`は実行していません。範囲とcheckout失敗の詳細は[テスト手順](docs/testing.md#review-time-validation)に記録し、ローカルcheckoutと固定policy sourceを使う検証は[Issue #2](https://github.com/i-pp/agent-orchestrator/issues/2)で追跡します。
 
 ## 発展的な使い方
 

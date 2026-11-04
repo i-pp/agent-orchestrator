@@ -43,15 +43,19 @@ python3 -B tests/live_phase2_e3_2.py --execute
 
 ## Review-time validation
 
-The review targeted PR head `2f4ae8d034087dd3e448c48e1a47d9b3950be75c`. The observed host was Ubuntu 26.04.1 LTS (x86_64) with Python 3.14.4; a Codex executable was present on PATH. A local checkout could not be created: `git clone` failed with `Could not resolve host: github.com`, and the execution environment subsequently became unavailable.
+### Source and environment
 
-Therefore, these commands were **not executed against the PR head**:
+The runtime source used for these checks was fetched through the GitHub API at commit `2f4ae8d034087dd3e448c48e1a47d9b3950be75c`. A local Git checkout could not be created because `git clone` failed with `Could not resolve host: github.com`; the checks below therefore used a disposable source snapshot, not a Git working tree. The PR edits after that commit are documentation-only; runtime source files are unchanged.
 
-- `python3 -B src/runner.py --help`
-- `python3 -B src/runner.py --runtime .runtime/docs-howto check`
-- the exclusive fixture creation snippet in [the runner how-to](how-to/run-task.md)
-- the `submit` and `show` commands in that how-to
+The host was Ubuntu 26.04.1 LTS, x86_64, Python 3.14.4. Checks used a temporary HOME and a fresh runtime under `.runtime/docs-howto`; no existing Codex auth file was exposed.
 
-Source inspection confirms that `src/runner.py` defines `--runtime`, `check`, `submit --acceptance`, `run --timeout`, and `show`. This is static inspection, not execution. The `Path.open('x')` exclusive-create behavior was separately checked in a temporary directory: a second open raised `FileExistsError` and preserved the original contents; this does not validate runner integration.
+### Commands and results
 
-The live `run` step was not attempted because it starts Codex and may consume subscription allowance. [Follow-up issue #2](https://github.com/i-pp/agent-orchestrator/issues/2) tracks checkout-level command validation.
+- `python3 -B src/runner.py --help`, plus `check --help`, `submit --help`, `run --help`, and `show --help`: all exited 0.
+- `python3 -B src/runner.py --runtime .runtime/docs-howto check`: returned `IsolationBlocked` with `status=BLOCKED`, `reason_code=NESTED_ISOLATION_FORBIDDEN`, `operation=codex-namespace`, and `executed=false`. The host was detected as sandboxed (`BWRAP_PROFILE`, `SANDBOX_PID1`, `USER_NAMESPACE_MAPPING`). The guard stopped before launching namespace tools or checking Codex login status. This is a blocked preflight, not a pass; no guard was bypassed.
+- The how-to's fixture snippet created `.runtime/docs-howto/workspace/fixture.txt`. Repeating exclusive creation raised `FileExistsError` and the original marker remained unchanged.
+- The queue-only `submit` command exited 0 and returned a task ID; `show` exited 0 and reported `QUEUED`. No Codex process or model call was started.
+- `python3 -B scripts/policy_context.py --help` exited 0. `--format inspect` exited 2 with `Checkout path is unavailable`: this API source snapshot had no sibling `../ai-orchestration` Git checkout at the configured pinned commit.
+- The live `run` command was not attempted. It requires the isolation preflight and may use the existing subscription. Do not treat the blocked `check` as permission to bypass isolation.
+
+[Follow-up issue #2](https://github.com/i-pp/agent-orchestrator/issues/2) tracks validation with an actual local checkout, the configured pinned policy source, and the live execution boundary.

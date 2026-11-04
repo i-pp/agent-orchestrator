@@ -5,6 +5,7 @@ This how-to runs a read-only fixture task in a fresh, dedicated runtime's shared
 ## Prerequisites
 
 - The documented Linux environment and existing Codex CLI setup are available; see the [README](../../README.md#installation).
+- The pinned common-policy checkout is configured at the operator-selected path. The configured pin is `aeef6db1cc9680833277f76962044da0dae501b9`; the default path is `../ai-orchestration` relative to the repository root. Verify it with `python3 -B scripts/policy_context.py --format inspect`; see the [common-policy guide](../common-policy.md).
 - `.runtime/docs-howto` is a new runtime directory with no existing task data. Use another unused name if needed.
 - The acceptance fixture is tracked at `examples/read-fixture.acceptance.json`.
 
@@ -12,9 +13,10 @@ This how-to runs a read-only fixture task in a fresh, dedicated runtime's shared
 
 Check the environment and create the fixture exclusively. The Python command fails with `FileExistsError` if `fixture.txt` already exists, preserving the existing file.
 
-> The `submit` and `run` commands invoke the existing Codex CLI and may consume subscription allowance. Continue only when you intend to perform a live Codex check.
+> `submit` only records the task and acceptance policy in the local runtime queue. `run` starts the Codex CLI and may consume subscription allowance; continue only when you intend to perform a live Codex check.
 
 ```bash
+python3 -B scripts/policy_context.py --format inspect
 python3 src/runner.py --runtime .runtime/docs-howto check
 python3 - <<'PY'
 from pathlib import Path
@@ -38,7 +40,8 @@ python3 src/runner.py --runtime .runtime/docs-howto show "$TASK_ID"
 
 ## Expected boundaries
 
-- `submit` queues the task; `run` performs the synchronous execution.
+- `submit` queues the task locally and does not start Codex; `run` performs the synchronous Codex execution.
+- `check` tests nested isolation and existing ChatGPT authentication. A `BLOCKED` result is not a pass; stop and do not bypass the isolation guard.
 - This example uses the fresh `.runtime/docs-howto` runtime, a shared workspace with a read-only sandbox, and serial execution.
 - The configured runtime must stay within the repository's `.runtime/` directory.
 - Passing a result string condition is not by itself proof of semantic correctness. Review the saved artifact and the acceptance evidence.
