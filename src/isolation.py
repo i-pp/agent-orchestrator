@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 from isolation_guard import require_isolation_creation
+from isolated_entry import codex_install_layout, validate_codex_node
 
 
 CONFIG = '''model = "gpt-6.1-sol"
@@ -110,12 +111,23 @@ def isolated_launch(root, binary, args, *, access="read-only", authenticate=True
     env = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "HOME": str(Path.home()),
            "CODEX_HOME": str(root / "codex-home"), "TMPDIR": "/tmp",
            "PYTHONDONTWRITEBYTECODE": "1"}
+    # npm's codex.js uses `/usr/bin/env node`, but the isolated PATH intentionally
+    # omits arbitrary host directories. Pass only the resolved Node executable;
+    # isolated_entry mounts that file read-only and invokes it directly.
+    if executable == installed_codex and executable.name == "codex.js":
+        layout = codex_install_layout(executable)
+        if layout["package_root"] is not None:
+            node_candidate = shutil.which("node")
+            node = validate_codex_node(layout, node_candidate)
+            if node.is_relative_to(root):
+                raise ValueError("Node.js runtime cannot come from the isolated runtime tree")
+            env["ACEIS_CODEX_NODE"] = str(node)
     argv = ["/usr/bin/unshare", "--user", "--map-root-user", "--mount", "--pid", "--ipc",
             "--fork", "--kill-child=SIGKILL", "--mount-proc"]
     if not authenticate:
         argv.append("--net")
     argv += [sys.executable, str(Path(__file__).with_name("isolated_entry.py")), str(root),
-             access, "auth" if authenticate else "no-auth", binary, *args]
+             access, "auth" if authenticate else "no-auth", str(executable), *args]
     return argv, env
 
 
