@@ -12,6 +12,8 @@ This how-to runs a read-only fixture task in a fresh, dedicated runtime's shared
 
 Check the environment and create the fixture exclusively. The Python command fails with `FileExistsError` if `fixture.txt` already exists, preserving the existing file.
 
+> The `submit` and `run` commands invoke the existing Codex CLI and may consume subscription allowance. Continue only when you intend to perform a live Codex check.
+
 ```bash
 python3 src/runner.py --runtime .runtime/docs-howto check
 python3 - <<'PY'
