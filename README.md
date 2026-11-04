@@ -19,7 +19,7 @@ python3 -B src/runner.py --help
 python3 -m unittest discover -s tests -v
 ```
 
-The [runner how-to](docs/how-to/run-task.md) demonstrates a read-only flow: check a fresh runtime, create a fixture, queue a task, then inspect its state. Review-time help, fixture, queue-only `submit`, and `show` checks passed against a GitHub API source snapshot of the runner; `check` returned `BLOCKED` in this Codex sandbox (`executed=false`), and live `run` was not attempted. The exact scope and the failed local checkout attempt are recorded in the [testing guide](docs/testing.md#review-time-validation). Follow-up issue [#2](https://github.com/i-pp/agent-orchestrator/issues/2) tracks validation with a local checkout and the pinned policy source.
+The [runner how-to](docs/how-to/run-task.md) demonstrates a read-only flow: check a fresh runtime, create a fixture, queue a task, then inspect its state. Review-time help commands and `policy_context inspect` passed against hash-verified GitHub API-materialized working trees at the exact PR head and pinned policy commit. Fixture creation, queue-only `submit`, and `show` passed against a source snapshot whose runtime blobs match this PR head. `check` returned `BLOCKED` in this Codex sandbox (`executed=false`), and live `run` was not attempted. The [testing guide](docs/testing.md#review-time-validation) records provenance and limits; follow-up issue [#2](https://github.com/i-pp/agent-orchestrator/issues/2) tracks canonical-origin verification and live execution.
 
 ## Advanced Usage
 
