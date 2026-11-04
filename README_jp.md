@@ -19,7 +19,7 @@ python3 -B src/runner.py --help
 python3 -m unittest discover -s tests -v
 ```
 
-[runnerの手順](docs/how-to/run-task.md)は、read-onlyの流れとしてruntime確認、fixture作成、taskのqueue登録、状態確認を案内します。レビュー時のhelpと`policy_context inspect`は、PRの正確なheadと固定policy commitをGitHub APIのhash検証済みobjectから作った作業ツリーで成功しました。fixture作成、queue専用の`submit`、`show`は、このPR headとruntime blobが一致するソースsnapshotで成功しました。`check`はこのCodex sandbox内で`BLOCKED`（`executed=false`）となり、liveな`run`は実行していません。正規originを確認できなかった点を含む出典と制限は[テスト手順](docs/testing.md#review-time-validation)に記録し、正規origin確認とlive実行は[Issue #2](https://github.com/i-pp/agent-orchestrator/issues/2)で追跡します。
+[runnerの手順](docs/how-to/run-task.md)は、read-onlyの流れとしてruntime確認、fixture作成、taskのqueue登録、状態確認を案内します。レビュー時のhelpと`policy_context inspect`は、検証対象のPRコードheadと固定policy commitをGitHub APIのhash検証済みobjectから作った作業ツリーで成功しました。その後のcommitは文書だけを変更しています。fixture作成、queue専用の`submit`、`show`は、現在のPR headとruntime blobが一致するソースsnapshotで成功しました。検証対象コードheadの`check`はこのCodex sandbox内で`BLOCKED`（`executed=false`）となり、liveな`run`は実行していません。正規originを確認できなかった点を含む出典と制限は[テスト手順](docs/testing.md#review-time-validation)に記録し、正規origin確認とlive実行は[Issue #2](https://github.com/i-pp/agent-orchestrator/issues/2)で追跡します。
 
 ## 発展的な使い方
 
