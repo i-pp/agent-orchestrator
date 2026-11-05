@@ -92,6 +92,13 @@ def counters(cgroup):
         result[name] = {k: int(v) for k, v in (line.split() for line in (path / name).read_text().splitlines())}
     for name in ["memory.current", "memory.peak", "pids.current", "pids.peak"]:
         result[name] = int((path / name).read_text())
+    memory_stat = path / "memory.stat"
+    if memory_stat.exists():
+        fields = {"anon", "file", "kernel", "sock", "shmem", "file_mapped", "file_dirty",
+                  "file_writeback", "inactive_anon", "active_anon", "inactive_file", "active_file",
+                  "slab_reclaimable", "slab_unreclaimable"}
+        result["memory.stat"] = {k: int(v) for k, v in
+            (line.split() for line in memory_stat.read_text().splitlines()) if k in fields}
     return result
 
 

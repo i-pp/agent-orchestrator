@@ -3,6 +3,10 @@
 確認日: 2026-10-28（Asia/Tokyo）。今回はローカル実装・試験と公式資料の確認まで。
 ChatGPT接続、Platform API呼出し、tunnel-client取得・起動、キー発行、権限・契約・課金設定変更は実施しない。
 
+## 2026-11-05追記
+
+以下はPhase 2-E1時点のstdio接続設計です。その後、別の隔離ブランチにHTTP/Events通知の統合候補を作成し、オフライン試験を実施しました。本番repoやTunnel構成には未反映で、実callback・ChatGPT会話再開は未確認です。Owner限定の実効アクセス範囲を確認できるまで通知は無効のままとします。候補の現在状態と導入・切戻し案は[MCP Events導入設計](mcp-events-deployment.md)、[実行時安全性](mcp-events-runtime-safety.md)を参照してください。
+
 ## 採用する境界
 
 ```text

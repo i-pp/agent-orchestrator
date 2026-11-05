@@ -20,6 +20,7 @@ PORTABLE_CONFIG_FILES = {
     ".codex/agents/verifier.toml",
     ".codex/agents/researcher.toml",
     ".codex/agents/independent_reviewer.toml",
+    "config/codex-pipeline.concurrent.example.json",
     "config/policy.json",
     "config/upstream-policy.json",
     "policies.md",
