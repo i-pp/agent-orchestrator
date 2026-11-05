@@ -17,7 +17,7 @@ PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / 'src'))
 
 from codex_host import HostGateway
-from local_principal import OAuthPrincipal
+from local_principal import current_local_principal
 from mcp_adapter import (Adapter, CAPABILITIES_META, REQUEST_PROTOCOL,
                          VERSION_META)
 from notification_outbox import BoundedResolver, EVENT_NAMES, NotificationError
@@ -26,8 +26,8 @@ from notification_runtime import (EVENTS_ENABLE_ENV, NotificationRuntime,
                                   make_host_gateway_factory)
 
 
-OWNER = OAuthPrincipal('https://issuer.example.test', 'test-owner')
-OTHER = OAuthPrincipal('https://issuer.example.test', 'test-other')
+OWNER = current_local_principal()
+OTHER = object()
 TASK = '00000000-0000-4000-8000-000000000251'
 THREAD = '10000000-0000-4000-8000-000000000251'
 SECRET = 'whsec_' + base64.b64encode(b'test-only-signing-secret-32bytes!!').decode('ascii')
@@ -125,10 +125,10 @@ class RuntimeCompositionTests(unittest.TestCase):
             callback_verifier=FixtureChallengeVerifier(resolver), authorize_task=authorize,
             owner_access_check=owner_access, allow_external_callbacks=True,
             allow_external_notifications=True,
-            authenticated_principal=OWNER, poll_seconds=0.05)
+            allow_single_user_local=True, poll_seconds=0.05)
         holder['runtime'] = components
-        holder['owner_principal'] = components.resolve_request_principal(OWNER)
-        holder['owner_identity'] = holder['owner_principal'].identity
+        holder['owner_principal'] = OWNER
+        holder['owner_identity'] = OWNER.identity
         return components
 
     def test_missing_production_providers_keep_adapter_and_daemon_fail_closed(self):
@@ -138,7 +138,7 @@ class RuntimeCompositionTests(unittest.TestCase):
             components = NotificationRuntime(
                 root, allow_external_callbacks=True,
                 allow_external_notifications=True,
-                authenticated_principal=OWNER)
+                allow_single_user_local=True)
             self.assertFalse(components.enabled)
             self.assertEqual(components.disabled_reason, 'NOTIFICATION_PROVIDER_UNAVAILABLE')
             self.assertFalse(components.outbox_path.exists())
@@ -152,7 +152,7 @@ class RuntimeCompositionTests(unittest.TestCase):
                 authorize_task=lambda _owner, _task: True,
                 owner_access_check=lambda _owner, _task: True,
                 allow_external_callbacks=True, allow_external_notifications=True,
-                authenticated_principal=OWNER)
+                allow_single_user_local=True)
             self.assertFalse(rejected.enabled)
             self.assertEqual(rejected.disabled_reason, 'BOUNDED_RESOLVER_REQUIRED')
 
@@ -165,7 +165,7 @@ class RuntimeCompositionTests(unittest.TestCase):
                 adapter.audit.close()
             temp.cleanup()
 
-    def test_runtime_refuses_external_events_without_verified_principal(self):
+    def test_runtime_requires_explicit_single_user_local_policy(self):
         temp, root = self._runtime_root()
         resolver = BoundedResolver(FixtureResolver())
         sender = InMemorySender(resolver)
@@ -179,7 +179,7 @@ class RuntimeCompositionTests(unittest.TestCase):
         try:
             self.assertFalse(runtime.enabled)
             self.assertIsNone(runtime.events_service)
-            self.assertEqual(runtime.disabled_reason, 'OIDC_ISSUER_REQUIRED')
+            self.assertEqual(runtime.disabled_reason, 'SINGLE_USER_LOCAL_MODE_REQUIRED')
             self.assertFalse(runtime.outbox_path.exists())
         finally:
             temp.cleanup()
@@ -199,12 +199,12 @@ class RuntimeCompositionTests(unittest.TestCase):
             self.assertEqual(off.disabled_reason, 'EXTERNAL_DELIVERY_DISABLED')
             self.assertFalse(off.outbox_path.exists())
 
-            not_authenticated = build_systemd_notification_runtime(
+            without_local_policy = build_systemd_notification_runtime(
                 root, events_transport=True,
                 environ={EVENTS_ENABLE_ENV: '1'}, provider_loader=loader)
-            self.assertFalse(not_authenticated.enabled)
-            self.assertEqual(not_authenticated.disabled_reason, 'OIDC_ISSUER_REQUIRED')
-            self.assertFalse(not_authenticated.outbox_path.exists())
+            self.assertFalse(without_local_policy.enabled)
+            self.assertEqual(without_local_policy.disabled_reason, 'EXTERNAL_DELIVERY_DISABLED')
+            self.assertFalse(without_local_policy.outbox_path.exists())
             self.assertEqual(loader_calls, [])
 
             stdio = build_systemd_notification_runtime(
@@ -217,6 +217,7 @@ class RuntimeCompositionTests(unittest.TestCase):
 
             malformed = build_systemd_notification_runtime(
                 root, events_transport=True,
+                allow_single_user_local=True,
                 environ={EVENTS_ENABLE_ENV: 'yes'},
                 provider_loader=loader)
             self.assertFalse(malformed.enabled)
@@ -248,22 +249,21 @@ class RuntimeCompositionTests(unittest.TestCase):
         runtime = build_systemd_notification_runtime(
             root, events_transport=True,
             environ={EVENTS_ENABLE_ENV: '1'},
-            authenticated_principal=OWNER, provider_loader=loader)
+            allow_single_user_local=True, provider_loader=loader)
         try:
             self.assertTrue(runtime.enabled, runtime.disabled_reason)
             self.assertEqual(len(seen), 1)
-            internal_owner = runtime.resolve_request_principal(OWNER)
-            self.assertTrue(runtime.events_service.bind_task_owner(TASK, internal_owner))
-            owner_hash = runtime.outbox.owner_hash(internal_owner)
-            other_owner = runtime.resolve_request_principal(OTHER)
+            self.assertTrue(runtime.events_service.bind_task_owner(TASK, OWNER))
+            owner_hash = runtime.outbox.owner_hash(OWNER)
             self.assertTrue(runtime.events_service.worker_access_check(owner_hash, TASK))
             self.assertFalse(runtime.events_service.worker_access_check('0' * 64, TASK))
+            self.assertFalse(runtime.events_service.worker_access_check(
+                runtime.outbox.owner_hash('legacy-multi-user-principal'), TASK))
             self.assertFalse(runtime.events_service.worker_access_check(owner_hash, THREAD))
-            self.assertFalse(runtime.events_service.task_owned_by(TASK, other_owner))
             with self.assertRaises(NotificationError):
-                runtime.events_service._authorize(other_owner, TASK)
+                runtime.events_service._authorize(OTHER, TASK)
             with self.assertRaises(NotificationError):
-                runtime.events_service._authorize(internal_owner, THREAD)
+                runtime.events_service._authorize(OWNER, THREAD)
         finally:
             temp.cleanup()
 
@@ -277,7 +277,7 @@ class RuntimeCompositionTests(unittest.TestCase):
             runtime = build_systemd_notification_runtime(
                 root, events_transport=True,
                 environ={EVENTS_ENABLE_ENV: '1'},
-                authenticated_principal=OWNER, provider_loader=missing_credentials)
+                allow_single_user_local=True, provider_loader=missing_credentials)
             self.assertFalse(runtime.enabled)
             self.assertEqual(runtime.disabled_reason, 'SYSTEMD_CREDENTIAL_UNAVAILABLE')
             self.assertFalse(runtime.outbox_path.exists())
@@ -306,8 +306,7 @@ class RuntimeCompositionTests(unittest.TestCase):
         adapter = Adapter(root, allow_codex_pipeline=True,
                           pipeline=SubmitPipeline(),
                           notification_runtime=adapter_components)
-        internal_owner = adapter_components.resolve_request_principal(OWNER)
-        self.assertTrue(adapter_components.events_service.bind_thread_owner(THREAD, internal_owner))
+        self.assertTrue(adapter_components.events_service.bind_thread_owner(THREAD, OWNER))
         gateway = None
         try:
             submitted = self._rpc(adapter, 'tools/call', {
@@ -316,7 +315,7 @@ class RuntimeCompositionTests(unittest.TestCase):
                               'request_key': 'runtime-test-001'}})
             data = submitted['result']['structuredContent']['data']
             self.assertEqual(data['notification_binding'], 'BOUND')
-            self.assertTrue(adapter_components.outbox.task_owned_by(TASK, internal_owner))
+            self.assertTrue(adapter_components.outbox.task_owned_by(TASK, OWNER))
 
             event_name = EVENT_NAMES['task_completed'][0]
             subscribed = self._rpc(adapter, 'events/subscribe', {
@@ -371,7 +370,7 @@ class RuntimeCompositionTests(unittest.TestCase):
             adapter.audit.close()
             temp.cleanup()
 
-    def test_http_pipeline_acl_and_listing_are_scoped_to_verified_subject(self):
+    def test_http_pipeline_acl_and_listing_exclude_unbound_legacy_resources(self):
         temp, root = self._runtime_root()
         task_a = TASK
         thread_a = THREAD
@@ -396,15 +395,11 @@ class RuntimeCompositionTests(unittest.TestCase):
                      'resolver': resolver, 'sender': sender,
                      'callback_verifier': FixtureChallengeVerifier(resolver)}
         runtime = build_systemd_notification_runtime(
-            root, events_transport=True, authenticated_principals=(OWNER, OTHER),
+            root, events_transport=True, allow_single_user_local=True,
             environ={EVENTS_ENABLE_ENV: '1'}, provider_loader=lambda **_kwargs: providers)
         self.assertTrue(runtime.enabled, runtime.disabled_reason)
-        owner_internal = runtime.resolve_request_principal(OWNER)
-        other_internal = runtime.resolve_request_principal(OTHER)
-        runtime.outbox.bind_thread_origin(thread_a, owner_internal)
-        runtime.outbox.bind_thread_origin(thread_b, other_internal)
-        runtime.outbox.bind_task_origin(task_a, owner_internal)
-        runtime.outbox.bind_task_origin(task_b, other_internal)
+        runtime.outbox.bind_thread_origin(thread_a, OWNER)
+        runtime.outbox.bind_task_origin(task_a, OWNER)
 
         class Pipeline:
             calls = []
@@ -425,13 +420,13 @@ class RuntimeCompositionTests(unittest.TestCase):
         adapter = Adapter(root, allow_codex_pipeline=True, pipeline=pipeline,
                           notification_runtime=runtime)
         try:
-            listed_a = self._rpc(adapter, 'tools/call', {
+            listed = self._rpc(adapter, 'tools/call', {
                 'name': 'codex_threads_list', 'arguments': {}}, OWNER)
-            data_a = listed_a['result']['structuredContent']['data']
-            self.assertEqual({item['id'] for item in data_a['threads']}, {thread_a})
-            self.assertEqual({item['id'] for item in data_a['tasks']}, {task_a})
-            self.assertNotIn('capacity', data_a)
-            self.assertEqual(data_a['total_records'], 2)
+            listed_data = listed['result']['structuredContent']['data']
+            self.assertEqual({item['id'] for item in listed_data['threads']}, {thread_a})
+            self.assertEqual({item['id'] for item in listed_data['tasks']}, {task_a})
+            self.assertNotIn('capacity', listed_data)
+            self.assertEqual(listed_data['total_records'], 2)
 
             calls_before = len(pipeline.calls)
             denied = self._rpc(adapter, 'tools/call', {
@@ -443,12 +438,6 @@ class RuntimeCompositionTests(unittest.TestCase):
             allowed = self._rpc(adapter, 'tools/call', {
                 'name': 'codex_task_get', 'arguments': {'task_id': task_a}}, OWNER)
             self.assertEqual(allowed['result']['structuredContent']['data']['id'], task_a)
-            listed_b = self._rpc(adapter, 'tools/call', {
-                'name': 'codex_threads_list', 'arguments': {}}, OTHER)
-            data_b = listed_b['result']['structuredContent']['data']
-            self.assertEqual({item['id'] for item in data_b['threads']}, {thread_b})
-            self.assertEqual({item['id'] for item in data_b['tasks']}, {task_b})
-
             events_a = self._rpc(adapter, 'tools/call', {
                 'name': 'codex_events', 'arguments': {'after': 0, 'limit': 20}}, OWNER)
             event_data = events_a['result']['structuredContent']['data']

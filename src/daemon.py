@@ -360,23 +360,13 @@ class Daemon:
                         self.root, self.runner.binary,
                         Path(__file__).resolve().parents[1], self.ordinary_busy)
                 else:
-                    from notification_runtime import (EVENTS_ENABLE_ENV,
-                                                      build_systemd_notification_runtime)
-                    oidc_verifier = None
-                    if os.environ.get(EVENTS_ENABLE_ENV) == '1':
-                        try:
-                            from oauth_auth import OIDCVerifierSet
-                            oidc_verifier = OIDCVerifierSet.from_environment()
-                        except (ValueError, OSError):
-                            # The worker has no inbound token; without the exact
-                            # issuer/audience/JWKS contract it stays disabled.
-                            oidc_verifier = None
+                    from notification_runtime import build_systemd_notification_runtime
                     self.pipeline = HostGateway(
                         self.root, self.runner.binary,
                         Path(__file__).resolve().parents[1], self.ordinary_busy,
                         notification_runtime=build_systemd_notification_runtime(
                             self.root, events_transport=True,
-                            oidc_verifier=oidc_verifier))
+                            allow_single_user_local=True))
             self.pending_recovery = scheduler.recover_dispatches(self.runner)
             # Reconcile retained UNKNOWN evidence before accepting new dispatch.
             for row in self.store.db.execute("SELECT id FROM tasks WHERE state='UNKNOWN'").fetchall():

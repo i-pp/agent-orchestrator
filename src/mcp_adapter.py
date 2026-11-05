@@ -18,7 +18,7 @@ import uuid
 from codex_pipeline import (TOOLS as PIPELINE_TOOLS, PipelineError,
                             tool_definitions as pipeline_tools, validate_arguments as pipeline_arguments)
 from control_socket import request
-from local_principal import AcePrincipal, LocalPrincipal, OAuthPrincipal
+from local_principal import LocalPrincipal
 from notification_outbox import NotificationError
 from storage import STATES
 from verification import normalize_acceptance
@@ -282,7 +282,7 @@ class Adapter:
 
     def _require_owned_pipeline_resource(self, principal, resource_type, resource_id):
         runtime = self.notification_runtime
-        if (not isinstance(principal, AcePrincipal) or not self.events_enabled
+        if (not isinstance(principal, LocalPrincipal) or not self.events_enabled
                 or runtime is None or getattr(runtime, 'outbox', None) is None):
             raise Invalid('Authenticated task ACL unavailable')
         if resource_type == 'task':
@@ -295,7 +295,7 @@ class Adapter:
 
     def _owner_scoped_thread_listing(self, principal, arguments):
         runtime = self.notification_runtime
-        if (not isinstance(principal, AcePrincipal) or not self.events_enabled
+        if (not isinstance(principal, LocalPrincipal) or not self.events_enabled
                 or runtime is None or getattr(runtime, 'outbox', None) is None):
             raise Invalid('Authenticated task ACL unavailable')
         records = []
@@ -341,7 +341,7 @@ class Adapter:
 
     def _owner_scoped_events(self, principal, arguments):
         runtime = self.notification_runtime
-        if (not isinstance(principal, AcePrincipal) or not self.events_enabled
+        if (not isinstance(principal, LocalPrincipal) or not self.events_enabled
                 or runtime is None or getattr(runtime, 'outbox', None) is None):
             raise Invalid('Authenticated task ACL unavailable')
         try:
@@ -405,7 +405,7 @@ class Adapter:
         self.record('begin', **facts)
         try:
             if name in PIPELINE_TOOLS:
-                if isinstance(request_principal, AcePrincipal):
+                if isinstance(request_principal, LocalPrincipal):
                     if name == 'codex_pipeline_tick':
                         raise Invalid('Shared pipeline tick is unavailable to per-user callers')
                     if name in ('codex_thread_start', 'codex_threads_list', 'codex_events',
@@ -438,7 +438,7 @@ class Adapter:
                         principal = request_principal
                         if principal is None and self.principal_provider is not None:
                             principal = self.principal_provider()
-                        if not isinstance(principal, (LocalPrincipal, AcePrincipal)):
+                        if not isinstance(principal, LocalPrincipal):
                             principal = None
                     except Exception:
                         principal = None
@@ -448,7 +448,7 @@ class Adapter:
                               or data.get('state') in ('UNKNOWN', 'BLOCKED'))
                 except PipelineError as exc:
                     data, failed = exc.result(), True
-                if (isinstance(request_principal, AcePrincipal) and not failed
+                if (isinstance(request_principal, LocalPrincipal) and not failed
                         and self.events_enabled and isinstance(data, dict)):
                     if name == 'codex_thread_start':
                         thread_id = data.get('thread_id')
@@ -471,10 +471,7 @@ class Adapter:
                         and isinstance(data, dict)):
                     task_id = data.get('task_id') or data.get('id')
                     if task_id:
-                        if isinstance(request_principal, AcePrincipal):
-                            data['notification_binding'] = ('BOUND' if data.get('access_binding') == 'BOUND'
-                                                             else 'UNAVAILABLE')
-                        elif principal is None:
+                        if principal is None:
                             data['notification_binding'] = 'UNAVAILABLE'
                         else:
                             try:
@@ -574,17 +571,6 @@ class Adapter:
         observed = isinstance(message, dict) and 'id' in message and method in (
             'initialize', 'server/discover', 'tools/list',
             'events/list', 'events/subscribe', 'events/unsubscribe')
-        if isinstance(principal, OAuthPrincipal):
-            try:
-                if self.notification_runtime is None:
-                    raise NotificationError('AUTHENTICATED_PRINCIPAL_REQUIRED')
-                principal = self.notification_runtime.resolve_request_principal(principal)
-            except Exception:
-                identifier = message.get('id') if isinstance(message, dict) else None
-                if not (type(identifier) is int
-                        or isinstance(identifier, str) and len(identifier) <= 128):
-                    identifier = None
-                return self.error(identifier, -32003, 'Authenticated principal unavailable')
         try:
             if observed: self.record('protocol_request', method=method)
             reply = self._handle(message, principal)
@@ -670,7 +656,7 @@ class Adapter:
                     principal = request_principal
                     if principal is None and self.principal_provider is not None:
                         principal = self.principal_provider()
-                    if not isinstance(principal, (LocalPrincipal, AcePrincipal)):
+                    if not isinstance(principal, LocalPrincipal):
                         raise NotificationError('AUTHENTICATED_PRINCIPAL_REQUIRED')
                     event_params = {key: value for key, value in params.items() if key != '_meta'}
                     result = self.events_service.handle(method, event_params, principal)
@@ -781,40 +767,30 @@ def main():
                         help='Explicit finite workstream grant; requires mailbox and private grant policy, default off')
     parser.add_argument('--allow-codex-pipeline', action='store_true',
                         help='Opt-in app-server executor; requires the existing daemon pipeline flag too')
+    parser.add_argument('--allow-single-user-local-http', action='store_true',
+                        help='Enable loopback HTTP for the sole local OS user; does not enable workspace sharing')
     args = parser.parse_args()
     os.umask(0o077)
     pipeline = None
     notification_runtime = None
-    oauth_verifier = oauth_metadata = oauth_metadata_uri = None
     try:
         if args.transport == 'http' and not args.allow_codex_pipeline:
-            raise ValueError('Authenticated HTTP mode requires the Codex task pipeline')
+            raise ValueError('HTTP mode requires the Codex task pipeline')
+        if args.transport == 'http' and not args.allow_single_user_local_http:
+            raise ValueError('HTTP mode requires the explicit single-user local policy')
+        if args.transport == 'stdio' and args.allow_single_user_local_http:
+            raise ValueError('Single-user local HTTP policy applies only to HTTP mode')
         if args.transport == 'http' and (args.allow_writes or args.allow_local_llm
                 or args.allow_local_models or args.allow_chat_mailbox or args.allow_mailbox_grants):
             raise ValueError('HTTP mode does not expose legacy or local helper tools')
         if args.allow_codex_pipeline:
             from notification_runtime import build_systemd_notification_runtime
-            if args.transport == 'http':
-                from oauth_auth import OIDCVerifierSet
-                from urllib.parse import urlsplit, urlunsplit
-                oauth_verifier = OIDCVerifierSet.from_environment()
-                resource_url = os.environ.get('ACEIS_OAUTH_RESOURCE_URL', '')
-                parsed_resource = urlsplit(resource_url)
-                if (parsed_resource.scheme != 'https' or not parsed_resource.hostname
-                        or parsed_resource.username is not None or parsed_resource.password is not None
-                        or parsed_resource.query or parsed_resource.fragment
-                        or parsed_resource.path != '/mcp'):
-                    raise ValueError('OAuth resource URL must be the public HTTPS /mcp endpoint')
-                oauth_metadata_uri = urlunsplit((parsed_resource.scheme, parsed_resource.netloc,
-                                                 '/.well-known/oauth-protected-resource', '', ''))
-                oauth_metadata = oauth_verifier.protected_resource_metadata(
-                    resource_url=resource_url)
             notification_runtime = build_systemd_notification_runtime(
                 args.runtime,
                 events_transport=(args.transport == 'http'),
-                oidc_verifier=oauth_verifier)
+                allow_single_user_local=(args.transport == 'http'))
             if args.transport == 'http' and not notification_runtime.enabled:
-                raise ValueError('Authenticated per-user pipeline ACL is unavailable')
+                raise ValueError('Single-user local notification runtime is unavailable')
             from codex_host import DaemonPipelineProxy
             pipeline = DaemonPipelineProxy(runtime_path(args.runtime))
         adapter = Adapter(
@@ -829,9 +805,7 @@ def main():
                              if tool.get('name', '').startswith('codex_')]
             from mcp_http_transport import serve_http
             return serve_http(adapter, port=args.http_port,
-                              oauth_verifier=oauth_verifier,
-                              oauth_metadata=oauth_metadata,
-                              oauth_metadata_uri=oauth_metadata_uri)
+                              allow_single_user_local=True)
         return serve(adapter)
     except (OSError, ValueError, TypeError, sqlite3.Error):
         print('Adapter startup refused: verify private runtime and operator policy.', file=sys.stderr)

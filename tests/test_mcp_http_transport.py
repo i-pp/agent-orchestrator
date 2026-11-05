@@ -15,7 +15,7 @@ sys.path.insert(0, str(PROJECT / 'src'))
 from mcp_adapter import (Adapter, PROTOCOL, REQUEST_PROTOCOL, VERSION_META,
                          CAPABILITIES_META)
 from mcp_http_transport import McpHttpEndpoint, make_http_server
-from local_principal import OAuthPrincipal, current_local_principal
+from local_principal import LocalPrincipal, current_local_principal
 from total_deadline import run_with_total_deadline
 
 
@@ -26,18 +26,6 @@ class FakeEvents:
     def handle(self, method, params, principal):
         self.last_principal = principal
         return {'events': [], 'method': method}
-
-
-class FakeOAuthVerifier:
-    principals = {
-        'Bearer test-alice': OAuthPrincipal('https://issuer.example.test', 'alice'),
-        'Bearer test-bob': OAuthPrincipal('https://issuer.example.test', 'bob'),
-    }
-
-    def verify(self, authorization):
-        if authorization not in self.principals:
-            raise ValueError('unauthorized')
-        return self.principals[authorization]
 
 
 class FakePipeline:
@@ -67,16 +55,13 @@ class MCPHTTPTransportTests(unittest.TestCase):
         self.adapter = Adapter(self.root, allow_codex_pipeline=True, pipeline=FakePipeline(),
                                events_service=FakeEvents(),
                                principal_provider=current_local_principal)
-        self.endpoint = McpHttpEndpoint(self.adapter, expected_port=8765)
+        self.endpoint = McpHttpEndpoint(
+            self.adapter, expected_port=8765, allow_single_user_local=True,
+            principal_provider=current_local_principal)
         self.auth_capture = AuthenticatedCaptureAdapter()
-        self.metadata = {'resource': 'https://mcp.example.test/mcp',
-                         'authorization_servers': ['https://issuer.example.test'],
-                         'scopes_supported': ['mcp:access'],
-                         'bearer_methods_supported': ['header']}
-        self.auth_endpoint = McpHttpEndpoint(
-            self.auth_capture, expected_port=8765, oauth_verifier=FakeOAuthVerifier(),
-            oauth_metadata=self.metadata,
-            oauth_metadata_uri='https://mcp.example.test/.well-known/oauth-protected-resource')
+        self.local_endpoint = McpHttpEndpoint(
+            self.auth_capture, expected_port=8765, allow_single_user_local=True,
+            principal_provider=current_local_principal)
         self.common_headers = {
             'Host': '127.0.0.1:8765',
             'Content-Type': 'application/json; charset=utf-8',
@@ -221,23 +206,14 @@ class MCPHTTPTransportTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '127.0.0.1'):
             make_http_server(self.adapter, host='0.0.0.0', port=8765)
 
-    def test_real_http_listener_requires_oauth_verification(self):
-        with self.assertRaisesRegex(ValueError, 'OAuth verification'):
+    def test_real_http_listener_requires_explicit_single_user_local_policy(self):
+        with self.assertRaisesRegex(ValueError, 'Single-user local'):
             make_http_server(self.adapter, host='127.0.0.1', port=0)
 
-    def test_oauth_challenge_metadata_uri_rejects_userinfo_query_and_fragment(self):
-        invalid_uris = (
-            'https://user@mcp.example.test/.well-known/oauth-protected-resource',
-            'https://mcp.example.test/.well-known/oauth-protected-resource?next=https://evil.test',
-            'https://mcp.example.test/.well-known/oauth-protected-resource#fragment',
-        )
-        for uri in invalid_uris:
-            with self.subTest(uri=uri):
-                with self.assertRaisesRegex(ValueError, 'HTTPS OAuth metadata URL'):
-                    McpHttpEndpoint(
-                        self.adapter, expected_port=8765,
-                        oauth_verifier=FakeOAuthVerifier(), oauth_metadata=self.metadata,
-                        oauth_metadata_uri=uri)
+    def test_listener_requires_local_principal_provider(self):
+        with self.assertRaisesRegex(ValueError, 'Local principal provider'):
+            make_http_server(AuthenticatedCaptureAdapter(), port=0,
+                             allow_single_user_local=True)
 
     def test_http_request_deadline_bounds_a_trickling_reader(self):
         stopped = threading.Event()
@@ -269,46 +245,36 @@ class MCPHTTPTransportTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'deadline'):
             make_http_server(self.adapter, request_deadline_seconds=120.1)
 
-    def test_oauth_metadata_is_public_but_every_mcp_request_requires_a_verified_bearer(self):
-        status, _, body = self.auth_endpoint.handle(
-            'GET', '/.well-known/oauth-protected-resource', self.common_headers, b'')
-        self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body), self.metadata)
-
+    def test_single_local_principal_ignores_spoofed_client_metadata(self):
         request = self._modern('events/list')
         request['params']['_meta']['openai/subject'] = 'spoofed-second-user'
         request['params']['_meta']['openai/session'] = 'spoofed-session'
         raw = json.dumps(request, separators=(',', ':')).encode()
         fields = {**self.common_headers, 'Content-Length': str(len(raw)),
                   'MCP-Protocol-Version': REQUEST_PROTOCOL, 'Mcp-Method': 'events/list'}
-        status, headers, _ = self.auth_endpoint.handle('POST', '/mcp', fields, raw)
-        self.assertEqual(status, 401)
-        self.assertIn('resource_metadata=', headers['WWW-Authenticate'])
-
-        fields['Authorization'] = 'Bearer test-alice'
-        status, _, response = self.auth_endpoint.handle('POST', '/mcp', fields, raw)
+        status, _, response = self.local_endpoint.handle('POST', '/mcp', fields, raw)
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(response)['result']['method'], 'events/list')
-        self.assertEqual(self.auth_capture.last_principal.subject, 'alice')
+        self.assertEqual(self.auth_capture.last_principal, current_local_principal())
+        self.assertIsInstance(self.auth_capture.last_principal, LocalPrincipal)
 
-    def test_legacy_session_is_bound_to_the_authenticated_subject(self):
+    def test_legacy_session_is_bound_to_the_local_uid(self):
         initialize = {'jsonrpc': '2.0', 'id': 1, 'method': 'initialize', 'params': {
             'protocolVersion': PROTOCOL, 'capabilities': {},
             'clientInfo': {'name': 'fixture', 'version': '1'}}}
         raw = json.dumps(initialize, separators=(',', ':')).encode()
         headers = {**self.common_headers, 'Content-Length': str(len(raw)),
-                   'MCP-Protocol-Version': PROTOCOL, 'Mcp-Method': 'initialize',
-                   'Authorization': 'Bearer test-alice'}
-        status, response_headers, _ = self.auth_endpoint.handle('POST', '/mcp', headers, raw)
+                   'MCP-Protocol-Version': PROTOCOL, 'Mcp-Method': 'initialize'}
+        status, response_headers, _ = self.local_endpoint.handle('POST', '/mcp', headers, raw)
         self.assertEqual(status, 200)
         session_id = response_headers['Mcp-Session-Id']
         notification = {'jsonrpc': '2.0', 'method': 'notifications/initialized'}
         raw = json.dumps(notification, separators=(',', ':')).encode()
         headers = {**self.common_headers, 'Content-Length': str(len(raw)),
                    'MCP-Protocol-Version': PROTOCOL, 'Mcp-Method': 'notifications/initialized',
-                   'Mcp-Session-Id': session_id, 'Authorization': 'Bearer test-bob'}
-        status, _, _ = self.auth_endpoint.handle('POST', '/mcp', headers, raw)
-        self.assertEqual(status, 403)
+                   'Mcp-Session-Id': session_id}
+        status, _, _ = self.local_endpoint.handle('POST', '/mcp', headers, raw)
+        self.assertEqual(status, 202)
 
 
 if __name__ == '__main__':

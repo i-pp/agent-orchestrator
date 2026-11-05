@@ -18,7 +18,7 @@ import unittest
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / 'src'))
 
-from local_principal import OAuthPrincipal
+from local_principal import current_local_principal
 from mcp_adapter import (CAPABILITIES_META, REQUEST_PROTOCOL, VERSION_META)
 from mcp_http_transport import McpHttpEndpoint
 from notification_outbox import BoundedResolver, EVENT_NAMES
@@ -26,8 +26,7 @@ from notification_runtime import (EVENTS_ENABLE_ENV,
                                   build_systemd_notification_runtime)
 
 
-OWNER = OAuthPrincipal('https://issuer.example.test', 'test-owner')
-OTHER = OAuthPrincipal('https://issuer.example.test', 'other-user')
+OWNER = current_local_principal()
 TASK = '00000000-0000-4000-8000-000000000301'
 THREAD = '10000000-0000-4000-8000-000000000301'
 CALLBACK = 'https://events.example.test/synthetic-callback'
@@ -77,15 +76,6 @@ class FixtureChallengeVerifier:
         return {'status_code': 200, 'echoed_challenge': challenge}
 
 
-class FixtureOAuthVerifier:
-    def verify(self, authorization):
-        principals = {'Bearer offline-fixture-token': OWNER,
-                      'Bearer offline-other-token': OTHER}
-        if authorization not in principals:
-            raise ValueError('unauthorized')
-        return principals[authorization]
-
-
 class SubmitPipeline:
     def __init__(self, write_state):
         self.write_state = write_state
@@ -132,10 +122,11 @@ class HttpEventsE2ETests(unittest.TestCase):
                     DO UPDATE SET body=excluded.body''', (packed,))
         os.chmod(self.source_db, 0o600)
 
-    def http_call(self, endpoint, method, params, identifier,
-                  authorization='Bearer offline-fixture-token'):
+    def http_call(self, endpoint, method, params, identifier):
         payload = dict(params)
-        payload['_meta'] = {VERSION_META: REQUEST_PROTOCOL, CAPABILITIES_META: {}}
+        payload['_meta'] = {VERSION_META: REQUEST_PROTOCOL, CAPABILITIES_META: {},
+                            'openai/subject': 'untrusted-client-supplied-user',
+                            'openai/session': 'untrusted-client-supplied-session'}
         message = {'jsonrpc': '2.0', 'id': identifier, 'method': method,
                    'params': payload}
         body = json.dumps(message, separators=(',', ':')).encode('utf-8')
@@ -149,7 +140,6 @@ class HttpEventsE2ETests(unittest.TestCase):
         }
         if method == 'tools/call':
             headers['Mcp-Name'] = payload.get('name')
-        headers['Authorization'] = authorization
         status, _, response = endpoint.handle(
             'POST', '/mcp', headers, body, remote_addr='127.0.0.1')
         self.assertEqual(status, 200, response.decode('utf-8', errors='replace'))
@@ -168,7 +158,7 @@ class HttpEventsE2ETests(unittest.TestCase):
         runtime = build_systemd_notification_runtime(
             self.root, events_transport=True,
             environ={EVENTS_ENABLE_ENV: '1'},
-            authenticated_principal=OWNER,
+            allow_single_user_local=True,
             provider_loader=lambda **_kwargs: providers)
         self.assertTrue(runtime.enabled, runtime.disabled_reason)
 
@@ -176,15 +166,10 @@ class HttpEventsE2ETests(unittest.TestCase):
         adapter = Adapter(self.root, allow_codex_pipeline=True,
                           pipeline=SubmitPipeline(self.write_state),
                           notification_runtime=runtime)
-        internal_owner = runtime.resolve_request_principal(OWNER)
-        self.assertTrue(runtime.events_service.bind_thread_owner(THREAD, internal_owner))
+        self.assertTrue(runtime.events_service.bind_thread_owner(THREAD, OWNER))
         endpoint = McpHttpEndpoint(
-            adapter, expected_port=8765, oauth_verifier=FixtureOAuthVerifier(),
-            oauth_metadata={'resource': 'https://mcp.example.test/mcp',
-                            'authorization_servers': ['https://issuer.example.test'],
-                            'scopes_supported': ['mcp:access'],
-                            'bearer_methods_supported': ['header']},
-            oauth_metadata_uri='https://mcp.example.test/.well-known/oauth-protected-resource')
+            adapter, expected_port=8765, allow_single_user_local=True,
+            principal_provider=current_local_principal)
         try:
             discovered = self.http_call(endpoint, 'server/discover', {}, 1)
             self.assertIn('events', discovered['result']['capabilities'])
@@ -197,21 +182,10 @@ class HttpEventsE2ETests(unittest.TestCase):
             }, 3)
             data = submitted['result']['structuredContent']['data']
             self.assertEqual(data['notification_binding'], 'BOUND')
-            self.assertTrue(runtime.outbox.task_owned_by(TASK, internal_owner))
+            self.assertTrue(runtime.outbox.task_owned_by(TASK, OWNER))
 
             listed = self.http_call(endpoint, 'events/list', {}, 4)
             self.assertIn(event_name, {item['name'] for item in listed['result']['events']})
-
-            other_listed = self.http_call(endpoint, 'events/list', {}, 41,
-                                          authorization='Bearer offline-other-token')
-            self.assertEqual(other_listed['result']['events'], [])
-            other_subscribe = self.http_call(endpoint, 'events/subscribe', {
-                'name': event_name, 'arguments': {'task_id': TASK},
-                'delivery': {'mode': 'webhook', 'url': CALLBACK,
-                             'secret': SIGNING_SECRET}}, 42,
-                authorization='Bearer offline-other-token')
-            self.assertEqual(other_subscribe['error']['data']['code'], 'TASK_NOT_AUTHORIZED')
-            self.assertEqual(runtime.outbox.summary()['active_subscriptions'], 0)
 
             subscribed = self.http_call(endpoint, 'events/subscribe', {
                 'name': event_name,
@@ -253,7 +227,7 @@ class HttpEventsE2ETests(unittest.TestCase):
             restarted = build_systemd_notification_runtime(
                 self.root, events_transport=True,
                 environ={EVENTS_ENABLE_ENV: '1'},
-                authenticated_principal=OWNER,
+                allow_single_user_local=True,
                 provider_loader=lambda **_kwargs: providers)
             self.assertTrue(restarted.enabled, restarted.disabled_reason)
             restarted_worker = restarted.worker_factory(

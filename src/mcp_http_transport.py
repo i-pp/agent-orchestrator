@@ -17,12 +17,11 @@ from urllib.parse import urlsplit
 
 from mcp_adapter import (PROTOCOL, REQUEST_PROTOCOL, VERSION_META,
                          CAPABILITIES_META, SERVER_INFO)
-from local_principal import principal_identity
+from local_principal import LocalPrincipal, principal_identity
 from total_deadline import run_with_total_deadline
 
 
 ENDPOINT_PATH = '/mcp'
-RESOURCE_METADATA_PATH = '/.well-known/oauth-protected-resource'
 MAX_HTTP_BODY = 65_536
 MAX_HTTP_SESSIONS = 128
 MAX_MCP_NAME = 8192
@@ -116,8 +115,8 @@ class McpHttpEndpoint:
     """Pure request handler; can be exercised without opening a network socket."""
 
     def __init__(self, adapter, *, expected_port, clock=time.time,
-                 session_ttl_seconds=3600, oauth_verifier=None,
-                 oauth_metadata=None, oauth_metadata_uri=None):
+                 session_ttl_seconds=3600, allow_single_user_local=False,
+                 principal_provider=None):
         if type(expected_port) is not int or not 1 <= expected_port <= 65535:
             raise ValueError('Expected loopback port is required')
         if not callable(getattr(adapter, 'handle', None)):
@@ -128,24 +127,15 @@ class McpHttpEndpoint:
             raise ValueError('Invalid MCP session configuration')
         self.clock = clock
         self.session_ttl_seconds = float(session_ttl_seconds)
-        if (oauth_verifier is None) != (oauth_metadata is None):
-            raise ValueError('OAuth verifier and protected-resource metadata must be configured together')
-        if oauth_verifier is not None:
-            if not callable(getattr(oauth_verifier, 'verify', None)) or not isinstance(oauth_metadata, dict):
-                raise ValueError('Invalid OAuth verifier configuration')
-            try:
-                parsed_metadata_uri = urlsplit(oauth_metadata_uri)
-                _ = parsed_metadata_uri.port
-            except (TypeError, ValueError):
-                raise ValueError('HTTPS OAuth metadata URL is required') from None
-            if (parsed_metadata_uri.scheme != 'https' or not parsed_metadata_uri.hostname
-                    or parsed_metadata_uri.username is not None
-                    or parsed_metadata_uri.password is not None
-                    or parsed_metadata_uri.query or parsed_metadata_uri.fragment):
-                raise ValueError('HTTPS OAuth metadata URL is required')
-        self.oauth_verifier = oauth_verifier
-        self.oauth_metadata = oauth_metadata
-        self.oauth_metadata_uri = oauth_metadata_uri
+        if type(allow_single_user_local) is not bool:
+            raise ValueError('Single-user local mode must be explicit')
+        if allow_single_user_local:
+            if not callable(principal_provider):
+                raise ValueError('Local principal provider is required')
+        elif principal_provider is not None:
+            raise ValueError('Principal provider requires single-user local mode')
+        self.allow_single_user_local = allow_single_user_local
+        self.principal_provider = principal_provider
         self._sessions = {}
         self._session_lock = threading.RLock()
         # Pipeline operations and the stdio adapter were designed as one
@@ -202,7 +192,7 @@ class McpHttpEndpoint:
             return session
 
     def handle(self, method, path, headers, body, *, remote_addr='127.0.0.1'):
-        if path not in (ENDPOINT_PATH, RESOURCE_METADATA_PATH):
+        if path != ENDPOINT_PATH:
             return self._reply(404)
         try:
             address = ipaddress.ip_address(remote_addr)
@@ -229,22 +219,14 @@ class McpHttpEndpoint:
         origin = fields.get('origin')
         if origin is not None and not _local_origin(origin, self.expected_port):
             return self._reply(403)
-        if path == RESOURCE_METADATA_PATH:
-            if self.oauth_metadata is None:
-                return self._reply(404)
-            if method != 'GET':
-                return self._reply(405, headers={'Allow': 'GET'})
-            return self._reply(200, self.oauth_metadata)
-        principal = None
-        if self.oauth_verifier is not None:
-            try:
-                principal = self.oauth_verifier.verify(fields.get('authorization'))
-            except Exception:
-                return self._reply(401, headers={
-                    'WWW-Authenticate': f'Bearer resource_metadata="{self.oauth_metadata_uri}"'})
-            if principal_identity(principal) is None:
-                return self._reply(401, headers={
-                    'WWW-Authenticate': f'Bearer resource_metadata="{self.oauth_metadata_uri}"'})
+        if not self.allow_single_user_local:
+            return self._reply(401)
+        try:
+            principal = self.principal_provider()
+        except Exception:
+            return self._reply(503)
+        if not isinstance(principal, LocalPrincipal):
+            return self._reply(503)
         if method == 'DELETE':
             session_id = fields.get('mcp-session-id')
             with self._session_lock:
@@ -407,8 +389,8 @@ class McpHttpEndpoint:
 
 def make_http_server(adapter, *, host='127.0.0.1', port=8765,
                      request_deadline_seconds=DEFAULT_HTTP_REQUEST_DEADLINE_SECONDS,
-                     oauth_verifier=None, oauth_metadata=None, oauth_metadata_uri=None):
-    """Create (but do not start) an OAuth-protected loopback HTTP server."""
+                     allow_single_user_local=False):
+    """Create a loopback HTTP server only under the explicit local-user policy."""
     if host != '127.0.0.1':
         raise ValueError('MCP HTTP server must bind to 127.0.0.1')
     if type(port) is not int or not 0 <= port <= 65535:
@@ -416,8 +398,11 @@ def make_http_server(adapter, *, host='127.0.0.1', port=8765,
     if (type(request_deadline_seconds) not in (int, float)
             or not 0.05 <= float(request_deadline_seconds) <= 120.0):
         raise ValueError('HTTP request deadline must be between 0.05 and 120 seconds')
-    if oauth_verifier is None:
-        raise ValueError('OAuth verification is required for an HTTP listener')
+    if allow_single_user_local is not True:
+        raise ValueError('Single-user local HTTP mode must be explicitly enabled')
+    principal_provider = getattr(adapter, 'principal_provider', None)
+    if not callable(principal_provider):
+        raise ValueError('Local principal provider is required for HTTP mode')
 
     class Server(ThreadingHTTPServer):
         daemon_threads = True
@@ -516,8 +501,8 @@ def make_http_server(adapter, *, host='127.0.0.1', port=8765,
     server = Server((host, port), Handler)
     try:
         endpoint_holder['endpoint'] = McpHttpEndpoint(
-            adapter, expected_port=server.server_port, oauth_verifier=oauth_verifier,
-            oauth_metadata=oauth_metadata, oauth_metadata_uri=oauth_metadata_uri)
+            adapter, expected_port=server.server_port,
+            allow_single_user_local=True, principal_provider=principal_provider)
     except Exception:
         # Configuration validation happens after binding because an ephemeral
         # port is part of the endpoint's Host check. Release the socket on every
@@ -530,12 +515,11 @@ def make_http_server(adapter, *, host='127.0.0.1', port=8765,
 
 def serve_http(adapter, *, port=8765,
                request_deadline_seconds=DEFAULT_HTTP_REQUEST_DEADLINE_SECONDS,
-               oauth_verifier=None, oauth_metadata=None, oauth_metadata_uri=None):
+               allow_single_user_local=False):
     """Explicit server runner. It never chooses a non-loopback bind address."""
     server = make_http_server(adapter, host='127.0.0.1', port=port,
                               request_deadline_seconds=request_deadline_seconds,
-                              oauth_verifier=oauth_verifier, oauth_metadata=oauth_metadata,
-                              oauth_metadata_uri=oauth_metadata_uri)
+                              allow_single_user_local=allow_single_user_local)
     try:
         server.serve_forever(poll_interval=0.2)
     finally:

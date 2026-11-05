@@ -6,7 +6,7 @@ and external callbacks stay disabled unless explicitly opted in for fixtures.
 """
 from notification_outbox import (BLOCKED_REASON_CODES, EVENT_NAMES,
     NotificationError, UUID_RE)
-from local_principal import AcePrincipal, LocalPrincipal
+from local_principal import LocalPrincipal, current_local_principal
 
 
 def _uuid_schema():
@@ -90,13 +90,13 @@ class McpEventsService:
         self.enabled = allow_external_callbacks
 
     def _principal(self, principal):
-        if not isinstance(principal, (LocalPrincipal, AcePrincipal)):
+        if not isinstance(principal, LocalPrincipal):
             raise NotificationError('AUTHENTICATED_PRINCIPAL_REQUIRED')
         self.outbox.owner_hash(principal)
         return principal
 
     def bind_task_owner(self, task_id, principal):
-        """Bind only to the authenticated request principal supplied by the transport."""
+        """Bind only to the local principal supplied by the loopback transport."""
         principal = self._principal(principal)
         if not isinstance(task_id, str) or not UUID_RE.fullmatch(task_id):
             raise NotificationError('INVALID_TASK_ID')
@@ -247,6 +247,13 @@ class McpEventsService:
 
     def worker_access_check(self, owner_hash, task_id):
         """Fail closed when task access cannot be revalidated after restart."""
+        # Do not resume rows created under a previous multi-principal/OIDC
+        # configuration after switching to the local single-user mode.
+        try:
+            if owner_hash != self.outbox.owner_hash(current_local_principal()):
+                return False
+        except Exception:
+            return False
         try:
             allowed = self.owner_access_check(owner_hash, task_id)
         except Exception:

@@ -19,7 +19,6 @@ from notification_outbox import (BLOCKED_REASON_CODES, EVENT_NAMES, Notification
 from codex_pipeline import Pipeline
 from codex_host import HostGateway
 from codex_app_protocol import RpcError
-from local_principal import AcePrincipal, OAuthPrincipal
 
 
 OWNER = 'mcp-principal:test-user-1'
@@ -76,34 +75,6 @@ class NotificationOutboxTests(unittest.TestCase):
             clock=lambda: self.now[0],
             resolver=lambda host: ['8.8.8.8'], base_backoff=1, max_backoff=4,
             max_attempts=4, lease_seconds=5)
-
-    def test_verified_oidc_identity_maps_to_stable_opaque_aceis_principal(self):
-        alice_oidc = OAuthPrincipal('https://issuer-a.example.test', 'opaque-sub-alice')
-        bob_oidc = OAuthPrincipal('https://issuer-a.example.test', 'opaque-sub-bob')
-        same_subject_from_other_issuer = OAuthPrincipal(
-            'https://issuer-b.example.test', 'opaque-sub-alice')
-        alice = self.outbox.resolve_oidc_principal(alice_oidc)
-        self.assertIsInstance(alice, AcePrincipal)
-        self.assertEqual(alice, self.outbox.resolve_oidc_principal(alice_oidc))
-        bob = self.outbox.resolve_oidc_principal(bob_oidc)
-        self.assertNotEqual(alice, bob)
-        issuer_b_alice = self.outbox.resolve_oidc_principal(same_subject_from_other_issuer)
-        self.assertNotEqual(alice, issuer_b_alice)
-
-        restarted_outbox = self.make_outbox()
-        self.assertEqual(alice, restarted_outbox.resolve_oidc_principal(alice_oidc))
-        raw = self.outbox_db.read_bytes()
-        self.assertNotIn(b'issuer-a.example.test', raw)
-        self.assertNotIn(b'opaque-sub-alice', raw)
-        self.assertNotIn(b'opaque-sub-bob', raw)
-
-        with sqlite3.connect(self.outbox_db) as conn:
-            rows = conn.execute(
-                'SELECT external_identity_hash, principal_id FROM notification_principal_mappings'
-            ).fetchall()
-        self.assertEqual(len(rows), 3)
-        self.assertTrue(all(len(identity_hash) == 64 for identity_hash, _ in rows))
-        self.assertTrue(all(principal_id.startswith('pid_v1_') for _, principal_id in rows))
 
     def write_source(self, state):
         conn = sqlite3.connect(self.source_db)

@@ -10,29 +10,4 @@ Agent Orchestrator helps operators distinguish running a Codex task from verifyi
 
 There is no Python package installer; the Python code uses the standard library. The documented environment requires Linux, Python 3.14, an existing Codex CLI and file-auth setup, `unshare`, `mount`, `setpriv`, `bwrap`, and cgroup v2 through a delegated systemd user manager. The reported verification host is Ubuntu 26.04.1 with Python 3.14.4 and `codex-cli 0.164.0-alpha.11.1`. Other operating systems, CLI versions, and keyring authentication are unverified. See the [systemd deployment gate](docs/systemd-deployment.md) and [PoC service setup](docs/poc-services.md).
 
-Before `run`, configure the operator-managed common-policy checkout. `config/upstream-policy.json` pins commit `aeef6db1cc9680833277f76962044da0dae501b9`; the default checkout path is `../ai-orchestration` relative to the repository root. Verify the selected checkout and pin with `python3 -B scripts/policy_context.py --format inspect`. See [common-policy setup](docs/common-policy.md) for path overrides and integrity requirements.
-
-## Usage
-
-```bash
-python3 -B src/runner.py --help
-python3 -m unittest discover -s tests -v
-```
-
-The [runner how-to](docs/how-to/run-task.md) demonstrates a read-only flow: check a fresh runtime, create a fixture, queue a task, then inspect its state. Review-time help commands and `policy_context inspect` passed against hash-verified GitHub API-materialized working trees at the reviewed PR code head and pinned policy commit; subsequent commits changed documentation only. Fixture creation, queue-only `submit`, and `show` passed against a source snapshot whose runtime blobs match the current PR head. `check` at the reviewed code head returned `BLOCKED` in this Codex sandbox (`executed=false`), and live `run` was not attempted. The [testing guide](docs/testing.md#review-time-validation) records provenance and limits; follow-up issue [#2](https://github.com/i-pp/agent-orchestrator/issues/2) tracks canonical-origin verification and live execution.
-
-## Advanced Usage
-
-- [Architecture and task lifecycle](docs/architecture.md)
-- [Workspace isolation](docs/workspace-isolation.md) Â· [Concurrency](docs/concurrency-design.md) Â· [Recovery](docs/recovery-design.md)
-- [Daemon](docs/daemon-design.md) Â· [Scheduler](docs/scheduler-design.md) Â· [Resource limits](docs/resource-limits.md)
-- [MCP connection design](docs/chatgpt-connection-design.md) Â· [Mailbox operations](docs/mailbox-operations.md) Â· [Mailbox grants](docs/mailbox-grants.md)
-- [Systemd deployment status](docs/systemd-deployment.md) Â· [Phase 2-E3 evidence](docs/phase2-e3-report.md) Â· [Development PoC evidence](docs/phase2-e3-2-report.md)
-
-## Documentation
-
-See [verification design](docs/verification-design.md), [Git tracking](docs/git-tracking.md), [testing](docs/testing.md), and the [phase report index](docs/phase-reports.md). Shared orchestration policies are maintained in [`i-pp/ai-orchestration`](https://github.com/i-pp/ai-orchestration). The [Japanese README](README_jp.md) is the translation of this canonical English page.
-
-## Optional MCP Events integration
-
-An opt-in Codex pipeline can expose authenticated Streamable HTTP and MCP Events support, with OIDC principals mapped to internal task owners and a durable notification outbox. The default local stdio adapter and its existing opt-in model and mailbox tools remain available. HTTP mode requires explicit pipeline activation and verified OAuth configuration; it exposes only owner-scoped Codex tools. See [MCP Events deployment](docs/mcp-events-deployment.md) and [runtime safety](docs/mcp-events-runtime-safety.md). Live callback delivery, ChatGPT conversation resumption, and the three-minute notification target have not been verified in a deployed environment.
+Before `run`, confçí¢G§²ÚîÆ­yÖVGVÆW%Ò†Fö72÷66†VGVÆW"ÖFW6–vâæÖB’+rµ&W6÷W&6RÆ–Ö—G5Ò†Fö72÷&W6÷W&6RÖÆ–Ö—G2æÖB¢Ò´Ô56öææV7F–öâFW6–våÒ†Fö72ö6†FwBÖ6öææV7F–öâÖFW6–vâæÖB’+r´Ö–Æ&÷‚÷W&F–öç5Ò†Fö72öÖ–Æ&÷‚Ö÷W&F–öç2æÖB’+r´Ö–Æ&÷‚w&çG5Ò†Fö72öÖ–Æ&÷‚Öw&çG2æÖB¢Òµ7—7FVÖBFWÆ÷–ÖVçB7FGW5Ò†Fö72÷7—7FVÖBÖFWÆ÷–ÖVçBæÖB’+rµ†6R"ÔS2Wf–FVæ6UÒ†Fö72÷†6S"ÖS2×&W÷'BæÖB’+r´FWfVÆ÷ÖVçBô2Wf–FVæ6UÒ†Fö72÷†6S"ÖS2Ó"×&W÷'BæÖB ¢22Fö7VÖVçFF–öà ¥6VR·fW&–f–6F–öâFW6–våÒ†Fö72÷fW&–f–6F–öâÖFW6–vâæÖB’Â´v—BG&6¶–æuÒ†Fö72öv—B×G&6¶–æræÖB’Â·FW7F–æuÒ†Fö72÷FW7F–æræÖB’ÂæBF†R·†6R&W÷'B–æFW…Ò†Fö72÷†6R×&W÷'G2æÖB’â6†&VB÷&6†W7G&F–öâöÆ–6–W2&RÖ–çF–æVB–â¶’×ö’Ö÷&6†W7G&F–öæÒ†‡GG3¢òöv—F‡V"æ6öÒö’×ö’Ö÷&6†W7G&F–öâ’âF†R´¦æW6R$TDÔUÒ…$TDÔUö§æÖB’—2F†RG&ç6ÆF–öâöbF†—26æöæ–6ÂVævÆ—6‚vRà ¢22÷F–öæÂÔ5WfVçG2–çFVw&F–öà ¤â÷BÖ–â6öFW‚—VÆ–æR6âW‡÷6RÆö÷&6²ÖöæÇ’7G&VÖ&ÆR…EEæBÔ5WfVçG2f÷"öæRÆö6Âõ2W6W"Âv—F‚GW&&ÆRæ÷F–f–6F–öâ÷WF&÷‚âF†RFVfVÇBÆö6Â7FF–òFFW"æB—G2W†—7F–ær÷BÖ–âÖöFVÂæBÖ–Æ&÷‚FööÇ2&VÖ–âf–Æ&ÆRâ…EEÖöFR&WV—&W2W‡Æ–6—B—VÆ–æRæB6–ævÆR×W6W"ÖÆö6ÂfÆw3²—BW‡÷6W2öæÇ’÷væW"×66÷VB6öFW‚FööÇ2â¶VWF†R6†DuBFWb&—fFRæBVçV&Æ—6†VBâ6VR´Ô5WfVçG2FWÆ÷–ÖVçEÒ†Fö72öÖ7ÖWfVçG2ÖFWÆ÷–ÖVçBæÖB’æB·'VçF–ÖR6fWG•Ò†Fö72öÖ7ÖWfVçG2×'VçF–ÖR×6fWG’æÖB’âÆ—fR6ÆÆ&6²FVÆ—fW'’Â6†DuB6öçfW'6F–öâ&W7V×F–öâÂæBF†RF‡&VRÖÖ–çWFRæ÷F–f–6F–öâF&vWB†fRæ÷B&VVâfW&–f–VB–âFWÆ÷–VBVçf—&öæÖVçBà

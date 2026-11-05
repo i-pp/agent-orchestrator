@@ -27,7 +27,7 @@ import time
 from urllib.parse import urlsplit
 import uuid
 
-from local_principal import AcePrincipal, OAuthPrincipal, principal_identity
+from local_principal import principal_identity
 from total_deadline import TotalDeadline
 
 
@@ -462,35 +462,6 @@ class NotificationOutbox:
     def owner_hash(self, authenticated_principal):
         return owner_digest(authenticated_principal, self.owner_hash_key)
 
-    def resolve_oidc_principal(self, oidc_identity):
-        """Resolve a verified issuer/subject pair to a stable opaque AceIS ID.
-
-        The external claims are HMACed for lookup and never stored. The internal
-        random ID is provider-neutral and persisted apart from task ownership,
-        subscription ownership, and callback destinations.
-        """
-        if not isinstance(oidc_identity, OAuthPrincipal):
-            raise NotificationError('VERIFIED_OIDC_IDENTITY_REQUIRED')
-        external = canonical({'issuer': oidc_identity.issuer,
-                              'subject': oidc_identity.subject}).encode('utf-8')
-        identity_hash = hmac.new(
-            self.owner_hash_key, b'aceis-oidc-link:v1:' + external,
-            hashlib.sha256).hexdigest()
-        with self._tx() as conn:
-            row = conn.execute(
-                'SELECT principal_id FROM notification_principal_mappings WHERE external_identity_hash=?',
-                (identity_hash,)).fetchone()
-            if row is None:
-                principal_id = 'pid_v1_' + uuid.uuid4().hex
-                conn.execute('INSERT INTO notification_principal_mappings VALUES (?,?,?)',
-                             (identity_hash, principal_id, self.clock()))
-            else:
-                principal_id = row[0]
-        try:
-            return AcePrincipal(principal_id)
-        except ValueError:
-            raise NotificationError('PRINCIPAL_MAPPING_CORRUPT') from None
-
     def _callback_url_digest(self, owner_hash, callback_url):
         message = ('aceis-mcp-callback-url:v1:' + owner_hash + ':' + callback_url).encode('utf-8')
         return hmac.new(self.owner_hash_key, message, hashlib.sha256).hexdigest()
@@ -545,9 +516,6 @@ class NotificationOutbox:
 
     def _init_schema(self):
         with self._tx() as conn:
-            conn.execute('''CREATE TABLE IF NOT EXISTS notification_principal_mappings (
-                external_identity_hash TEXT PRIMARY KEY, principal_id TEXT NOT NULL UNIQUE,
-                created_at REAL NOT NULL)''')
             conn.execute('''CREATE TABLE IF NOT EXISTS notification_task_origins (
                 task_id TEXT PRIMARY KEY, owner_hash TEXT NOT NULL, bound_at REAL NOT NULL)''')
             conn.execute('''CREATE TABLE IF NOT EXISTS notification_thread_origins (
