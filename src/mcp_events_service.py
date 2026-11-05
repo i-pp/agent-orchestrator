@@ -6,7 +6,7 @@ and external callbacks stay disabled unless explicitly opted in for fixtures.
 """
 from notification_outbox import (BLOCKED_REASON_CODES, EVENT_NAMES,
     NotificationError, UUID_RE)
-from local_principal import LocalPrincipal, OAuthPrincipal
+from local_principal import AcePrincipal, LocalPrincipal
 
 
 def _uuid_schema():
@@ -90,7 +90,7 @@ class McpEventsService:
         self.enabled = allow_external_callbacks
 
     def _principal(self, principal):
-        if not isinstance(principal, (LocalPrincipal, OAuthPrincipal)):
+        if not isinstance(principal, (LocalPrincipal, AcePrincipal)):
             raise NotificationError('AUTHENTICATED_PRINCIPAL_REQUIRED')
         self.outbox.owner_hash(principal)
         return principal

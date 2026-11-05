@@ -13,7 +13,7 @@ sys.path.insert(0, str(PROJECT / 'src'))
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from local_principal import OAuthPrincipal
-from oauth_auth import OAuthError, OAuthJWTVerifier
+from oauth_auth import OIDCVerifierSet, OAuthError, OAuthJWTVerifier
 
 
 def b64url(raw):
@@ -62,6 +62,63 @@ class OAuthJWTVerifierTests(unittest.TestCase):
         self.assertEqual({item.subject for item in verifier.principals},
                          {'owner-opaque-id', 'second-opaque-id'})
 
+    def test_provider_neutral_mode_maps_any_verified_subject_without_pre_enumeration(self):
+        verifier = OAuthJWTVerifier(
+            issuer='https://issuer.example.test', audience='https://mcp.example.test/mcp',
+            jwks=self.jwks, clock=lambda: self.now)
+        principal = verifier.verify('Bearer ' + self.sign({'sub': 'new-opaque-subject'}))
+        self.assertEqual(principal, OAuthPrincipal(
+            'https://issuer.example.test', 'new-opaque-subject'))
+        self.assertIsNone(verifier.allowed_subjects)
+
+    def test_external_session_identity_is_opaque_and_delimiter_unambiguous(self):
+        first = OAuthPrincipal('https://issuer.example.test/path', 'segment:tail')
+        second = OAuthPrincipal('https://issuer.example.test/path:segment', 'tail')
+        self.assertNotEqual(first.identity, second.identity)
+        self.assertNotIn(first.issuer, first.identity)
+        self.assertNotIn(first.subject, first.identity)
+
+    def test_oidc_verifier_set_accepts_multiple_standard_issuers_for_one_resource(self):
+        issuer_a = OAuthJWTVerifier(
+            issuer='https://entra.example.test/tenant/v2.0',
+            audience='https://mcp.example.test/mcp', jwks=self.jwks,
+            clock=lambda: self.now)
+        issuer_b = OAuthJWTVerifier(
+            issuer='https://google-oidc.example.test',
+            audience='https://mcp.example.test/mcp', jwks=self.jwks,
+            clock=lambda: self.now)
+        verifier_set = OIDCVerifierSet(
+            (issuer_a, issuer_b), authorization_servers=(
+                'https://entra.example.test/tenant/v2.0',
+                'https://google-oidc.example.test'))
+        a = verifier_set.verify('Bearer ' + self.sign({
+            'iss': 'https://entra.example.test/tenant/v2.0', 'sub': 'same-user-sub'}))
+        b = verifier_set.verify('Bearer ' + self.sign({
+            'iss': 'https://google-oidc.example.test', 'sub': 'same-user-sub'}))
+        self.assertEqual(a.issuer, issuer_a.issuer)
+        self.assertEqual(b.issuer, issuer_b.issuer)
+        metadata = verifier_set.protected_resource_metadata(
+            resource_url='https://mcp.example.test/mcp')
+        self.assertEqual(metadata['authorization_servers'], [
+            'https://entra.example.test/tenant/v2.0', 'https://google-oidc.example.test'])
+
+    def test_oidc_verifier_set_rejects_different_resource_contracts(self):
+        first = OAuthJWTVerifier(
+            issuer='https://entra.example.test/tenant/v2.0',
+            audience='https://mcp.example.test/mcp', jwks=self.jwks)
+        other_audience = OAuthJWTVerifier(
+            issuer='https://google-oidc.example.test',
+            audience='https://other.example.test/mcp', jwks=self.jwks)
+        with self.assertRaisesRegex(ValueError, 'same MCP audience'):
+            OIDCVerifierSet((first, other_audience))
+
+    def test_events_scope_alone_cannot_authorize_pipeline_access(self):
+        with self.assertRaisesRegex(ValueError, 'OAuth scopes'):
+            OAuthJWTVerifier(
+                issuer='https://issuer.example.test',
+                audience='https://mcp.example.test/mcp', jwks=self.jwks,
+                required_scopes=('mcp:events',))
+
     def test_environment_loader_requires_read_only_pinned_jwks_file(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / 'jwks.json'
@@ -73,6 +130,10 @@ class OAuthJWTVerifierTests(unittest.TestCase):
                        'ACEIS_OAUTH_JWKS_FILE': str(path)}
             verifier = OAuthJWTVerifier.from_environment(environ)
             self.assertEqual(len(verifier.principals), 2)
+            no_subject_allowlist = dict(environ)
+            no_subject_allowlist.pop('ACEIS_OAUTH_ALLOWED_SUBJECTS_JSON')
+            dynamically_mapped = OAuthJWTVerifier.from_environment(no_subject_allowlist)
+            self.assertIsNone(dynamically_mapped.allowed_subjects)
             path.chmod(0o600)
             with self.assertRaises(ValueError):
                 OAuthJWTVerifier.from_environment(environ)

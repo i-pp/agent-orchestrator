@@ -2,7 +2,8 @@
 
 The authorization server is an existing external IdP; this module does not
 issue tokens, fetch keys, or accept OpenAI client metadata as an identity.
-Operators provision a pinned public JWKS and exact issuer/audience/subject.
+Operators provision a pinned public JWKS and exact issuer/audience/scope
+contract; verified issuer/subject pairs map to provider-independent AceIS IDs.
 """
 import base64
 import binascii
@@ -98,19 +99,20 @@ def _load_jwks(path):
 
 
 class OAuthJWTVerifier:
-    """Verify RS256 bearer JWTs against an operator-pinned JWKS and one subject."""
+    """Provider-neutral RS256 OIDC access-token verifier using pinned issuer keys."""
 
     def __init__(self, *, issuer, audience, allowed_subject=None, allowed_subjects=None, jwks,
                  required_scopes=('mcp:access',), clock=time.time, leeway_seconds=30):
         if allowed_subjects is None:
-            allowed_subjects = () if allowed_subject is None else (allowed_subject,)
+            allowed_subjects = None if allowed_subject is None else (allowed_subject,)
         elif isinstance(allowed_subjects, str):
             allowed_subjects = (allowed_subjects,)
-        if (not isinstance(allowed_subjects, (tuple, list, set, frozenset))
-                or not 1 <= len(allowed_subjects) <= 32
-                or any(not isinstance(subject, str) or not 1 <= len(subject) <= 255
-                       for subject in allowed_subjects)
-                or len(set(allowed_subjects)) != len(allowed_subjects)):
+        if (allowed_subjects is not None
+                and (not isinstance(allowed_subjects, (tuple, list, set, frozenset))
+                     or not 1 <= len(allowed_subjects) <= 32
+                     or any(not isinstance(subject, str) or not 1 <= len(subject) <= 255
+                            for subject in allowed_subjects)
+                     or len(set(allowed_subjects)) != len(allowed_subjects))):
             raise ValueError('Invalid OAuth subject allowlist')
         if (not _https_url(issuer) or not isinstance(audience, str)
                 or not audience or len(audience) > 512
@@ -118,7 +120,8 @@ class OAuthJWTVerifier:
                 or not 0 <= leeway_seconds <= 120 or not callable(clock)):
             raise ValueError('Invalid OAuth verifier configuration')
         if (not isinstance(required_scopes, (tuple, list, set, frozenset))
-                or not required_scopes or not set(required_scopes) <= SCOPES):
+                or 'mcp:access' not in required_scopes
+                or not set(required_scopes) <= SCOPES):
             raise ValueError('Invalid OAuth scopes')
         if not isinstance(jwks, dict) or set(jwks) != {'keys'}:
             raise ValueError('Invalid JWKS')
@@ -150,13 +153,18 @@ class OAuthJWTVerifier:
                 raise ValueError('Invalid JWKS key') from None
         self.issuer = issuer
         self.audience = audience
-        self.allowed_subjects = frozenset(allowed_subjects)
+        self.allowed_subjects = (None if allowed_subjects is None
+                                 else frozenset(allowed_subjects))
         self.required_scopes = frozenset(required_scopes)
         self.clock = clock
         self.leeway_seconds = float(leeway_seconds)
         self._public_keys = public_keys
-        self.principals = tuple(OAuthPrincipal(issuer, subject)
-                                for subject in sorted(self.allowed_subjects))
+        # Kept for compatibility with offline fixtures that opt into an exact
+        # subject allowlist. Normal OIDC operation maps each verified `sub` at
+        # request time and does not require pre-enumerating users.
+        self.principals = (tuple(OAuthPrincipal(issuer, subject)
+                                 for subject in sorted(self.allowed_subjects))
+                           if self.allowed_subjects is not None else ())
         self.principal = self.principals[0] if len(self.principals) == 1 else None
 
     @classmethod
@@ -175,8 +183,6 @@ class OAuthJWTVerifier:
                 raise ValueError('OAuth subject allowlist is invalid') from None
         else:
             subjects = environment.get('ACEIS_OAUTH_ALLOWED_SUBJECT')
-        if not subjects:
-            raise ValueError('OAuth subject allowlist is required')
         path = Path(environment['ACEIS_OAUTH_JWKS_FILE'])
         if not path.is_absolute() or any(parent.is_symlink() for parent in [path, *path.parents]):
             raise ValueError('Unsafe JWKS path')
@@ -214,7 +220,10 @@ class OAuthJWTVerifier:
                        padding.PKCS1v15(), hashes.SHA256())
             now = float(self.clock())
             exp, nbf, issued = claims.get('exp'), claims.get('nbf'), claims.get('iat')
-            if (claims.get('iss') != self.issuer or claims.get('sub') not in self.allowed_subjects
+            subject = claims.get('sub')
+            if (claims.get('iss') != self.issuer
+                    or not isinstance(subject, str) or not 1 <= len(subject) <= 255
+                    or self.allowed_subjects is not None and subject not in self.allowed_subjects
                     or not _integer_claim(exp) or exp <= now - self.leeway_seconds
                     or nbf is not None and (not _integer_claim(nbf) or nbf > now + self.leeway_seconds)
                     or issued is not None and (not _integer_claim(issued) or issued > now + self.leeway_seconds)):
@@ -229,8 +238,7 @@ class OAuthJWTVerifier:
                       and all(isinstance(item, str) for item in raw_scopes) else set())
             if not self.required_scopes <= scopes:
                 raise OAuthError('UNAUTHORIZED')
-            return next(principal for principal in self.principals
-                        if principal.subject == claims['sub'])
+            return OAuthPrincipal(self.issuer, subject)
         except OAuthError:
             raise OAuthError('UNAUTHORIZED') from None
         except Exception:
@@ -241,5 +249,93 @@ class OAuthJWTVerifier:
             raise ValueError('OAuth resource metadata requires HTTPS URLs')
         return {'resource': resource_url,
                 'authorization_servers': [authorization_server],
+                'scopes_supported': sorted(self.required_scopes),
+                'bearer_methods_supported': ['header']}
+
+
+class OIDCVerifierSet:
+    """Provider-neutral MCP resource verifier for one or more pinned OIDC issuers.
+
+    Each issuer must issue an RS256 JWT access token whose audience and scopes
+    target this MCP resource. This does not implement an authorization server
+    or treat an OIDC ID token as an MCP access token.
+    """
+
+    def __init__(self, verifiers, *, authorization_servers=None):
+        if (not isinstance(verifiers, (tuple, list)) or not 1 <= len(verifiers) <= 8
+                or any(not isinstance(item, OAuthJWTVerifier) for item in verifiers)):
+            raise ValueError('Invalid OIDC verifier set')
+        if len({item.issuer for item in verifiers}) != len(verifiers):
+            raise ValueError('Duplicate OIDC issuer')
+        if len({item.audience for item in verifiers}) != 1:
+            raise ValueError('OIDC issuers must target the same MCP audience')
+        if authorization_servers is None:
+            authorization_servers = tuple(item.issuer for item in verifiers)
+        elif isinstance(authorization_servers, str):
+            authorization_servers = (authorization_servers,)
+        if (not isinstance(authorization_servers, (tuple, list))
+                or len(authorization_servers) != len(verifiers)
+                or any(not _https_url(value) for value in authorization_servers)):
+            raise ValueError('Invalid OIDC authorization-server list')
+        scope_sets = {item.required_scopes for item in verifiers}
+        if len(scope_sets) != 1:
+            raise ValueError('OIDC issuers must share the MCP scope contract')
+        self.verifiers = tuple(verifiers)
+        self.issuers = tuple(item.issuer for item in verifiers)
+        self.authorization_servers = tuple(authorization_servers)
+        self.audience = verifiers[0].audience
+        self.required_scopes = verifiers[0].required_scopes
+        self.issuer = self.issuers[0] if len(self.issuers) == 1 else None
+
+    @classmethod
+    def from_environment(cls, environ=None):
+        environment = os.environ if environ is None else environ
+        raw = environment.get('ACEIS_OIDC_PROVIDERS_JSON')
+        if raw:
+            if not isinstance(raw, str) or len(raw.encode('utf-8')) > MAX_JWKS_BYTES:
+                raise ValueError('OIDC provider configuration is too large')
+            try:
+                entries = json.loads(raw, object_pairs_hook=_pairs)
+            except (ValueError, json.JSONDecodeError):
+                raise ValueError('OIDC provider configuration is invalid') from None
+            if not isinstance(entries, list) or not 1 <= len(entries) <= 8:
+                raise ValueError('OIDC provider configuration is invalid')
+            verifiers, auth_servers = [], []
+            for entry in entries:
+                if (not isinstance(entry, dict)
+                        or set(entry) - {'issuer', 'audience', 'jwks_file',
+                                         'authorization_server', 'required_scopes'}
+                        or not {'issuer', 'audience', 'jwks_file'} <= set(entry)):
+                    raise ValueError('OIDC provider configuration is invalid')
+                path = Path(entry['jwks_file'])
+                if not path.is_absolute() or any(parent.is_symlink()
+                                                 for parent in [path, *path.parents]):
+                    raise ValueError('Unsafe JWKS path')
+                scopes = entry.get('required_scopes', ['mcp:access'])
+                jwks = _load_jwks(path)
+                verifiers.append(OAuthJWTVerifier(
+                    issuer=entry['issuer'], audience=entry['audience'], jwks=jwks,
+                    required_scopes=scopes))
+                auth_servers.append(entry.get('authorization_server', entry['issuer']))
+            return cls(verifiers, authorization_servers=auth_servers)
+
+        verifier = OAuthJWTVerifier.from_environment(environment)
+        authorization_server = environment.get('ACEIS_OAUTH_AUTHORIZATION_SERVER',
+                                               verifier.issuer)
+        return cls((verifier,), authorization_servers=(authorization_server,))
+
+    def verify(self, authorization):
+        for verifier in self.verifiers:
+            try:
+                return verifier.verify(authorization)
+            except OAuthError:
+                continue
+        raise OAuthError('UNAUTHORIZED')
+
+    def protected_resource_metadata(self, *, resource_url):
+        if not _https_url(resource_url):
+            raise ValueError('OAuth resource metadata requires HTTPS URLs')
+        return {'resource': resource_url,
+                'authorization_servers': list(self.authorization_servers),
                 'scopes_supported': sorted(self.required_scopes),
                 'bearer_methods_supported': ['header']}

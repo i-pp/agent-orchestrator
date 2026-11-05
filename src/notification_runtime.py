@@ -5,7 +5,6 @@ here. Callers must provide reviewed providers and explicitly enable both
 callback and worker delivery. Tests inject disposable test-only providers.
 """
 import os
-import hmac
 from pathlib import Path
 import sqlite3
 import stat
@@ -16,6 +15,14 @@ from notification_outbox import (BoundedResolver, NotificationError,
                                  NotificationOutbox, NotificationWorker)
 
 
+def _valid_oidc_issuer(value):
+    try:
+        OAuthPrincipal(value, 'configuration-check')
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
 class NotificationRuntime:
     """Construct both sides over one private source ledger and durable outbox."""
 
@@ -23,6 +30,7 @@ class NotificationRuntime:
                  resolver=None, sender=None, callback_verifier=None,
                  authorize_task=None, owner_access_check=None,
                  authenticated_principal=None, authenticated_principals=None,
+                 authenticated_issuers=None,
                  allow_external_callbacks=False,
                  allow_external_notifications=False, poll_seconds=1.0):
         self.runtime_root = Path(runtime).expanduser().absolute()
@@ -44,22 +52,26 @@ class NotificationRuntime:
             raise NotificationError('INVALID_NOTIFICATION_POLICY')
         if not (allow_external_callbacks and allow_external_notifications):
             return
-        # A local UID or operator attestation is not remote caller identity.
+        # Require an exact OIDC issuer allowlist from the verifier configuration;
+        # a local UID, email, or operator-supplied subject is not remote identity.
         if authenticated_principals is None:
             authenticated_principals = (() if authenticated_principal is None
                                         else (authenticated_principal,))
         elif isinstance(authenticated_principals, OAuthPrincipal):
             authenticated_principals = (authenticated_principals,)
-        if (not isinstance(authenticated_principals, (tuple, list, set, frozenset))
-                or not authenticated_principals
-                or any(not isinstance(item, OAuthPrincipal) for item in authenticated_principals)):
-            self.disabled_reason = 'OAUTH_PRINCIPAL_REQUIRED'
+        if authenticated_issuers is None:
+            if (isinstance(authenticated_principals, (tuple, list, set, frozenset))
+                    and all(isinstance(item, OAuthPrincipal) for item in authenticated_principals)):
+                authenticated_issuers = tuple(sorted({item.issuer for item in authenticated_principals}))
+        elif isinstance(authenticated_issuers, str):
+            authenticated_issuers = (authenticated_issuers,)
+        if (not isinstance(authenticated_issuers, (tuple, list, set, frozenset))
+                or not authenticated_issuers
+                or any(not _valid_oidc_issuer(issuer) for issuer in authenticated_issuers)
+                or len(set(authenticated_issuers)) != len(authenticated_issuers)):
+            self.disabled_reason = 'OIDC_ISSUER_REQUIRED'
             return
-        authenticated_principals = tuple(authenticated_principals)
-        identity_set = {item.identity for item in authenticated_principals}
-        if len(identity_set) != len(authenticated_principals):
-            self.disabled_reason = 'OAUTH_PRINCIPAL_CONFIGURATION_INVALID'
-            return
+        authenticated_issuers = frozenset(authenticated_issuers)
         required = {
             'secret_cipher': secret_cipher,
             'owner_hash_key': owner_hash_key,
@@ -110,9 +122,16 @@ class NotificationRuntime:
             return
         self.outbox = outbox
         self.events_service = service
-        self.authenticated_principals = authenticated_principals
+        self.authenticated_issuers = authenticated_issuers
         self.enabled = True
         self.disabled_reason = None
+
+    def resolve_request_principal(self, oidc_identity):
+        """Map an already verified OIDC identity to its internal AceIS ID."""
+        if (not self.enabled or not isinstance(oidc_identity, OAuthPrincipal)
+                or oidc_identity.issuer not in self.authenticated_issuers):
+            raise NotificationError('AUTHENTICATED_PRINCIPAL_REQUIRED')
+        return self.outbox.resolve_oidc_principal(oidc_identity)
 
     def _private_runtime_ready(self):
         root = self.runtime_root
@@ -153,6 +172,8 @@ EVENTS_ENABLE_ENV = 'ACEIS_MCP_EVENTS_ENABLED'
 def build_systemd_notification_runtime(runtime, *, events_transport=False,
                                        authenticated_principal=None,
                                        authenticated_principals=None,
+                                       authenticated_issuers=None,
+                                       oidc_verifier=None,
                                        environ=None, provider_loader=None):
     """Opt into OS-backed providers only after explicit transport and scope gates.
 
@@ -174,23 +195,32 @@ def build_systemd_notification_runtime(runtime, *, events_transport=False,
         return disabled
     if enabled != '1':
         return NotificationRuntime(runtime)
+    if oidc_verifier is not None:
+        issuers = getattr(oidc_verifier, 'issuers', None)
+        if issuers is None:
+            issuer = getattr(oidc_verifier, 'issuer', None)
+            issuers = (issuer,) if isinstance(issuer, str) else None
+        if authenticated_issuers is None:
+            authenticated_issuers = issuers
     if authenticated_principals is None and authenticated_principal is not None:
         authenticated_principals = (authenticated_principal,)
     if isinstance(authenticated_principals, OAuthPrincipal):
         authenticated_principals = (authenticated_principals,)
-    if (not isinstance(authenticated_principals, (tuple, list, set, frozenset))
-            or not authenticated_principals
-            or any(not isinstance(item, OAuthPrincipal) for item in authenticated_principals)):
+    if authenticated_issuers is None and isinstance(
+            authenticated_principals, (tuple, list, set, frozenset)):
+        if all(isinstance(item, OAuthPrincipal) for item in authenticated_principals):
+            authenticated_issuers = tuple(sorted({item.issuer for item in authenticated_principals}))
+    if isinstance(authenticated_issuers, str):
+        authenticated_issuers = (authenticated_issuers,)
+    if (not isinstance(authenticated_issuers, (tuple, list, set, frozenset))
+            or not authenticated_issuers
+            or any(not _valid_oidc_issuer(issuer) for issuer in authenticated_issuers)
+            or len(set(authenticated_issuers)) != len(authenticated_issuers)):
         return NotificationRuntime(
             runtime, allow_external_callbacks=True,
             allow_external_notifications=True,
-            authenticated_principals=authenticated_principals)
-    authenticated_principals = tuple(authenticated_principals)
-    allowed_identities = {item.identity for item in authenticated_principals}
-    if len(allowed_identities) != len(authenticated_principals):
-        disabled = NotificationRuntime(runtime)
-        disabled.disabled_reason = 'OAUTH_PRINCIPAL_CONFIGURATION_INVALID'
-        return disabled
+            authenticated_issuers=authenticated_issuers)
+    authenticated_issuers = tuple(authenticated_issuers)
 
     # Do not load systemd credentials unless both explicit flags are true.
     try:
@@ -208,14 +238,14 @@ def build_systemd_notification_runtime(runtime, *, events_transport=False,
         disabled = NotificationRuntime(
             runtime, allow_external_callbacks=True,
             allow_external_notifications=True,
-            authenticated_principals=authenticated_principals)
+            authenticated_issuers=authenticated_issuers)
         disabled.disabled_reason = exc.code
         return disabled
     except Exception:
         disabled = NotificationRuntime(
             runtime, allow_external_callbacks=True,
             allow_external_notifications=True,
-            authenticated_principals=authenticated_principals)
+            authenticated_issuers=authenticated_issuers)
         disabled.disabled_reason = 'NOTIFICATION_PROVIDER_UNAVAILABLE'
         return disabled
 
@@ -223,19 +253,18 @@ def build_systemd_notification_runtime(runtime, *, events_transport=False,
 
     def authorize_task(identity, task_id):
         components = owner_runtime.get('runtime')
-        if (components is None or components.outbox is None
-                or identity not in allowed_identities):
+        if components is None or components.outbox is None:
             return False
+        # `bind_task_owner` calls this only after a successful task-submit/store
+        # operation; subscription authorization separately checks the durable
+        # owner binding before allowing a delivery route.
         return components.outbox.source_task_exists(task_id)
 
     def owner_access_check(owner_hash, task_id):
         components = owner_runtime.get('runtime')
         if components is None or components.outbox is None:
             raise NotificationError('TASK_AUTHORIZATION_UNAVAILABLE')
-        expected = {components.outbox.owner_hash(principal)
-                    for principal in authenticated_principals}
-        if not isinstance(owner_hash, str) or not any(
-                hmac.compare_digest(owner_hash, candidate) for candidate in expected):
+        if not isinstance(owner_hash, str):
             return False
         return (components.outbox.task_owned_by_hash(task_id, owner_hash)
                 and components.outbox.source_task_exists(task_id))
@@ -244,7 +273,7 @@ def build_systemd_notification_runtime(runtime, *, events_transport=False,
         runtime, **providers, authorize_task=authorize_task,
         owner_access_check=owner_access_check,
         allow_external_callbacks=True, allow_external_notifications=True,
-        authenticated_principals=authenticated_principals)
+        authenticated_issuers=authenticated_issuers)
     owner_runtime['runtime'] = components
     return components
 

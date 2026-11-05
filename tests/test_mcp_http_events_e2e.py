@@ -176,7 +176,8 @@ class HttpEventsE2ETests(unittest.TestCase):
         adapter = Adapter(self.root, allow_codex_pipeline=True,
                           pipeline=SubmitPipeline(self.write_state),
                           notification_runtime=runtime)
-        self.assertTrue(runtime.events_service.bind_thread_owner(THREAD, OWNER))
+        internal_owner = runtime.resolve_request_principal(OWNER)
+        self.assertTrue(runtime.events_service.bind_thread_owner(THREAD, internal_owner))
         endpoint = McpHttpEndpoint(
             adapter, expected_port=8765, oauth_verifier=FixtureOAuthVerifier(),
             oauth_metadata={'resource': 'https://mcp.example.test/mcp',
@@ -196,7 +197,7 @@ class HttpEventsE2ETests(unittest.TestCase):
             }, 3)
             data = submitted['result']['structuredContent']['data']
             self.assertEqual(data['notification_binding'], 'BOUND')
-            self.assertTrue(runtime.outbox.task_owned_by(TASK, OWNER))
+            self.assertTrue(runtime.outbox.task_owned_by(TASK, internal_owner))
 
             listed = self.http_call(endpoint, 'events/list', {}, 4)
             self.assertIn(event_name, {item['name'] for item in listed['result']['events']})

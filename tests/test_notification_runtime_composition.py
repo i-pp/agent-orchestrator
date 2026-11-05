@@ -111,12 +111,13 @@ class RuntimeCompositionTests(unittest.TestCase):
         sender.resolver = resolver
 
         def authorize(identity, task_id):
-            return identity == OWNER.identity and task_id in allowed_tasks
+            return identity == holder.get('owner_identity') and task_id in allowed_tasks
 
         def owner_access(owner_hash, task_id):
             components = holder.get('runtime')
             return (components is not None and task_id in allowed_tasks
-                    and owner_hash == components.outbox.owner_hash(OWNER))
+                    and owner_hash == components.outbox.owner_hash(
+                        holder.get('owner_principal')))
 
         components = NotificationRuntime(
             root, secret_cipher=TestOnlyCipher(), owner_hash_key=OWNER_KEY,
@@ -126,6 +127,8 @@ class RuntimeCompositionTests(unittest.TestCase):
             allow_external_notifications=True,
             authenticated_principal=OWNER, poll_seconds=0.05)
         holder['runtime'] = components
+        holder['owner_principal'] = components.resolve_request_principal(OWNER)
+        holder['owner_identity'] = holder['owner_principal'].identity
         return components
 
     def test_missing_production_providers_keep_adapter_and_daemon_fail_closed(self):
@@ -154,9 +157,9 @@ class RuntimeCompositionTests(unittest.TestCase):
             self.assertEqual(rejected.disabled_reason, 'BOUNDED_RESOLVER_REQUIRED')
 
             adapter = Adapter(root, notification_runtime=components)
-            result = self._rpc(adapter, 'server/discover')['result']
+            result = self._rpc(adapter, 'server/discover', principal=None)['result']
             self.assertNotIn('events', result['capabilities'])
-            self.assertEqual(self._rpc(adapter, 'events/list')['error']['code'], -32601)
+            self.assertEqual(self._rpc(adapter, 'events/list', principal=None)['error']['code'], -32601)
         finally:
             if adapter is not None:
                 adapter.audit.close()
@@ -176,7 +179,7 @@ class RuntimeCompositionTests(unittest.TestCase):
         try:
             self.assertFalse(runtime.enabled)
             self.assertIsNone(runtime.events_service)
-            self.assertEqual(runtime.disabled_reason, 'OAUTH_PRINCIPAL_REQUIRED')
+            self.assertEqual(runtime.disabled_reason, 'OIDC_ISSUER_REQUIRED')
             self.assertFalse(runtime.outbox_path.exists())
         finally:
             temp.cleanup()
@@ -200,7 +203,7 @@ class RuntimeCompositionTests(unittest.TestCase):
                 root, events_transport=True,
                 environ={EVENTS_ENABLE_ENV: '1'}, provider_loader=loader)
             self.assertFalse(not_authenticated.enabled)
-            self.assertEqual(not_authenticated.disabled_reason, 'OAUTH_PRINCIPAL_REQUIRED')
+            self.assertEqual(not_authenticated.disabled_reason, 'OIDC_ISSUER_REQUIRED')
             self.assertFalse(not_authenticated.outbox_path.exists())
             self.assertEqual(loader_calls, [])
 
@@ -249,15 +252,18 @@ class RuntimeCompositionTests(unittest.TestCase):
         try:
             self.assertTrue(runtime.enabled, runtime.disabled_reason)
             self.assertEqual(len(seen), 1)
-            self.assertTrue(runtime.events_service.bind_task_owner(TASK, OWNER))
-            owner_hash = runtime.outbox.owner_hash(OWNER)
+            internal_owner = runtime.resolve_request_principal(OWNER)
+            self.assertTrue(runtime.events_service.bind_task_owner(TASK, internal_owner))
+            owner_hash = runtime.outbox.owner_hash(internal_owner)
+            other_owner = runtime.resolve_request_principal(OTHER)
             self.assertTrue(runtime.events_service.worker_access_check(owner_hash, TASK))
             self.assertFalse(runtime.events_service.worker_access_check('0' * 64, TASK))
             self.assertFalse(runtime.events_service.worker_access_check(owner_hash, THREAD))
-            self.assertFalse(runtime.events_service.authorize_task(
-                OWNER.identity + ':other', TASK))
-            self.assertFalse(runtime.events_service.authorize_task(
-                OWNER.identity, THREAD))
+            self.assertFalse(runtime.events_service.task_owned_by(TASK, other_owner))
+            with self.assertRaises(NotificationError):
+                runtime.events_service._authorize(other_owner, TASK)
+            with self.assertRaises(NotificationError):
+                runtime.events_service._authorize(internal_owner, THREAD)
         finally:
             temp.cleanup()
 
@@ -300,7 +306,8 @@ class RuntimeCompositionTests(unittest.TestCase):
         adapter = Adapter(root, allow_codex_pipeline=True,
                           pipeline=SubmitPipeline(),
                           notification_runtime=adapter_components)
-        self.assertTrue(adapter_components.events_service.bind_thread_owner(THREAD, OWNER))
+        internal_owner = adapter_components.resolve_request_principal(OWNER)
+        self.assertTrue(adapter_components.events_service.bind_thread_owner(THREAD, internal_owner))
         gateway = None
         try:
             submitted = self._rpc(adapter, 'tools/call', {
@@ -309,7 +316,7 @@ class RuntimeCompositionTests(unittest.TestCase):
                               'request_key': 'runtime-test-001'}})
             data = submitted['result']['structuredContent']['data']
             self.assertEqual(data['notification_binding'], 'BOUND')
-            self.assertTrue(adapter_components.outbox.task_owned_by(TASK, OWNER))
+            self.assertTrue(adapter_components.outbox.task_owned_by(TASK, internal_owner))
 
             event_name = EVENT_NAMES['task_completed'][0]
             subscribed = self._rpc(adapter, 'events/subscribe', {
@@ -392,10 +399,12 @@ class RuntimeCompositionTests(unittest.TestCase):
             root, events_transport=True, authenticated_principals=(OWNER, OTHER),
             environ={EVENTS_ENABLE_ENV: '1'}, provider_loader=lambda **_kwargs: providers)
         self.assertTrue(runtime.enabled, runtime.disabled_reason)
-        runtime.outbox.bind_thread_origin(thread_a, OWNER)
-        runtime.outbox.bind_thread_origin(thread_b, OTHER)
-        runtime.outbox.bind_task_origin(task_a, OWNER)
-        runtime.outbox.bind_task_origin(task_b, OTHER)
+        owner_internal = runtime.resolve_request_principal(OWNER)
+        other_internal = runtime.resolve_request_principal(OTHER)
+        runtime.outbox.bind_thread_origin(thread_a, owner_internal)
+        runtime.outbox.bind_thread_origin(thread_b, other_internal)
+        runtime.outbox.bind_task_origin(task_a, owner_internal)
+        runtime.outbox.bind_task_origin(task_b, other_internal)
 
         class Pipeline:
             calls = []

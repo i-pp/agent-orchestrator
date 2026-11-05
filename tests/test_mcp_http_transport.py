@@ -45,6 +45,16 @@ class FakePipeline:
         return {'status': 'READY'}
 
 
+class AuthenticatedCaptureAdapter:
+    def __init__(self):
+        self.last_principal = None
+
+    def handle(self, message, *, principal=None):
+        self.last_principal = principal
+        return {'jsonrpc': '2.0', 'id': message.get('id'),
+                'result': {'method': message.get('method')}}
+
+
 class MCPHTTPTransportTests(unittest.TestCase):
     def setUp(self):
         runtime_parent = PROJECT / '.runtime'
@@ -58,12 +68,13 @@ class MCPHTTPTransportTests(unittest.TestCase):
                                events_service=FakeEvents(),
                                principal_provider=current_local_principal)
         self.endpoint = McpHttpEndpoint(self.adapter, expected_port=8765)
+        self.auth_capture = AuthenticatedCaptureAdapter()
         self.metadata = {'resource': 'https://mcp.example.test/mcp',
                          'authorization_servers': ['https://issuer.example.test'],
                          'scopes_supported': ['mcp:access'],
                          'bearer_methods_supported': ['header']}
         self.auth_endpoint = McpHttpEndpoint(
-            self.adapter, expected_port=8765, oauth_verifier=FakeOAuthVerifier(),
+            self.auth_capture, expected_port=8765, oauth_verifier=FakeOAuthVerifier(),
             oauth_metadata=self.metadata,
             oauth_metadata_uri='https://mcp.example.test/.well-known/oauth-protected-resource')
         self.common_headers = {
@@ -278,7 +289,7 @@ class MCPHTTPTransportTests(unittest.TestCase):
         status, _, response = self.auth_endpoint.handle('POST', '/mcp', fields, raw)
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(response)['result']['method'], 'events/list')
-        self.assertEqual(self.adapter.events_service.last_principal.subject, 'alice')
+        self.assertEqual(self.auth_capture.last_principal.subject, 'alice')
 
     def test_legacy_session_is_bound_to_the_authenticated_subject(self):
         initialize = {'jsonrpc': '2.0', 'id': 1, 'method': 'initialize', 'params': {

@@ -1,10 +1,12 @@
-"""Typed principals for local-only and authenticated OAuth MCP requests.
+"""Local, externally authenticated, and internal AceIS principal types.
 
-`LocalPrincipal` describes the adapter process only. Remote HTTP requests must
-use `OAuthPrincipal`, which is constructed by the verified JWT resource server.
+HTTP bearer tokens are verified into `OAuthPrincipal` and then mapped to an
+opaque `AcePrincipal` before task or notification authorization.
 """
 from dataclasses import dataclass
+import hashlib
 import os
+import re
 from urllib.parse import urlsplit
 
 
@@ -23,7 +25,7 @@ class LocalPrincipal:
 
 @dataclass(frozen=True)
 class OAuthPrincipal:
-    """Identity derived only from a successfully verified OAuth access token."""
+    """External OIDC issuer/subject identity from a verified OAuth access token."""
 
     issuer: str
     subject: str
@@ -43,7 +45,28 @@ class OAuthPrincipal:
 
     @property
     def identity(self):
-        return f'oauth:{self.issuer}:{self.subject}'
+        issuer = self.issuer.encode('utf-8')
+        subject = self.subject.encode('utf-8')
+        pair = (len(issuer).to_bytes(4, 'big') + issuer
+                + len(subject).to_bytes(4, 'big') + subject)
+        digest = hashlib.sha256(b'aceis-oidc-session:v1\0' + pair).hexdigest()
+        return 'oidc-session:v1:' + digest
+
+
+@dataclass(frozen=True)
+class AcePrincipal:
+    """Provider-independent AceIS identity; contains no external claims or email."""
+
+    principal_id: str
+
+    def __post_init__(self):
+        if (not isinstance(self.principal_id, str)
+                or re.fullmatch(r'pid_v1_[0-9a-f]{32}', self.principal_id) is None):
+            raise ValueError('Invalid AceIS principal ID')
+
+    @property
+    def identity(self):
+        return 'aceis-principal:' + self.principal_id
 
 
 def current_local_principal():
@@ -55,11 +78,14 @@ def principal_identity(value):
     """Return a stable identity for internal outbox storage APIs.
 
     Low-level outbox tests retain string fixtures; the MCP Events service
-    accepts only a typed local or verified OAuth principal.
+    accepts typed local, internal AceIS, or verified OIDC principals at their
+    respective boundaries.
     """
     if isinstance(value, LocalPrincipal):
         return value.identity
     if isinstance(value, OAuthPrincipal):
+        return value.identity
+    if isinstance(value, AcePrincipal):
         return value.identity
     if isinstance(value, str):
         return value
