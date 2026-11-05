@@ -33,7 +33,6 @@ The [runner how-to](docs/how-to/run-task.md) demonstrates a read-only flow: chec
 
 See [verification design](docs/verification-design.md), [Git tracking](docs/git-tracking.md), [testing](docs/testing.md), and the [phase report index](docs/phase-reports.md). Shared orchestration policies are maintained in [`i-pp/ai-orchestration`](https://github.com/i-pp/ai-orchestration). The [Japanese README](README_jp.md) is the translation of this canonical English page.
 
-
 ## Optional MCP Events integration
 
 An opt-in Codex pipeline can expose authenticated Streamable HTTP and MCP Events support, with OIDC principals mapped to internal task owners and a durable notification outbox. The default local stdio adapter and its existing opt-in model and mailbox tools remain available. HTTP mode requires explicit pipeline activation and verified OAuth configuration; it exposes only owner-scoped Codex tools. See [MCP Events deployment](docs/mcp-events-deployment.md) and [runtime safety](docs/mcp-events-runtime-safety.md). Live callback delivery, ChatGPT conversation resumption, and the three-minute notification target have not been verified in a deployed environment.

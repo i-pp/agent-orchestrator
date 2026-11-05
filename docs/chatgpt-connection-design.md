@@ -135,14 +135,14 @@ App Serverや任意の引数へこの例外を使えず、失敗時のホスト�
 6. 秘密値はローカルの安全な方法で`CONTROL_PLANE_API_KEY`へ渡す。chat、CLI引数、設定ファイル、Gitやログへ値を記載しない。
 7. 下記の公式ガイドのコマンド形を、実機helpと承認内容に照合して使う。**今回はどれも実行していない。**
 
-```bash
-tunnel-client help quickstart
-tunnel-client init --sample sample_mcp_stdio_local --profile orchestrator-readonly \
-  --tunnel-id <approved-tunnel-id> \
-  --mcp-command "python3 -B /absolute/repo/src/mcp_adapter.py --runtime /absolute/repo/.runtime/approved-readonly"
-tunnel-client doctor --profile orchestrator-readonly --explain
-tunnel-client run --profile orchestrator-readonly
-```
+   ```bash
+   tunnel-client help quickstart
+   tunnel-client init --sample sample_mcp_stdio_local --profile orchestrator-readonly \
+     --tunnel-id <approved-tunnel-id> \
+     --mcp-command "python3 -B /absolute/repo/src/mcp_adapter.py --runtime /absolute/repo/.runtime/approved-readonly"
+   tunnel-client doctor --profile orchestrator-readonly --explain
+   tunnel-client run --profile orchestrator-readonly
+   ```
 
 8. readiness／pollingを確認する。tunnel-client自身には既定loopbackの管理UI等があるため、そのbind／権限も確認する。外部公開やsystemd導入を自動で追加しない。
 9. ChatGPT webのcustom MCP接続でTunnelを選択し、承認済みID、サーバー認証を設定する。TunnelキーとサーバーOAuthを混同しない。
