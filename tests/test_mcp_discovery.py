@@ -179,10 +179,27 @@ class NativeDiscoveryTests(unittest.TestCase):
                     key = root/'synthetic-key'
                     key.write_text('public-synthetic-mcp-discovery-fixture')
                     key.chmod(0o600)
+                    profile = root/'tunnel-client-test.yaml'
+                    profile.write_text(f'''config_version: 1
+control_plane:
+  base_url: "{plane.url}"
+  tunnel_id: "tunnel_22222222222222222222222222222222"
+  api_key: "file:{key}"
+health:
+  listen_addr: "127.0.0.1:0"
+admin_ui:
+  open_browser: false
+log:
+  level: warn
+  format: json
+mcp:
+  commands: []
+''')
+                    profile.chmod(0o600)
                     import shlex
                     command = shlex.join([sys.executable, '-B', str(PROJECT/'src/mcp_adapter.py'), '--runtime', str(root)])
                     env = {k: v for k, v in os.environ.items() if k in ['HOME', 'PATH', 'LANG', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS']}
-                    tunnel = subprocess.Popen([str(CLIENT), 'run', '--profile-file', str(PROJECT/'systemd/aceis-mcp-tunnel.yaml'),
+                    tunnel = subprocess.Popen([str(CLIENT), 'run', '--profile-file', str(profile),
                         '--control-plane.base-url='+plane.url, '--control-plane.tunnel-id=tunnel_22222222222222222222222222222222',
                         '--control-plane.api-key=file:'+str(key), '--control-plane.poll-timeout=1s', '--control-plane.initial-poll-timeout=1s',
                         '--mcp.command=channel=main,command='+command, '--health.listen-addr=127.0.0.1:0',
