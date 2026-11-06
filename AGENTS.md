@@ -1,6 +1,6 @@
 # 共通ポリシーとproject固有の作業指示
 
-共通指示の正本は [`i-pp/ai-orchestration`](https://github.com/i-pp/ai-orchestration) のdocs/ai/orchestration.md・docs/ai/policies.md・agents/README.md。`config/upstream-policy.json`でcommitと各hashを固定し、既存ローカルcheckoutの固定Git内容を読む。本文をこのrepoへ複製管理しない。旧 [`policies.md`](policies.md) v1.0はhash固定の履歴として保全し、現在の共通本文として二重注入しない。開始時に次を実行し、検証済みの本文・version・SHA-256を実際に受け取ってからpolicy依存の作業へ適用する。
+共通指示の正本は [`i-pp/ai-orchestration`](https://github.com/i-pp/ai-orchestration) のdocs/ai/orchestration.md・docs/ai/policies.md・agents/README.mdと、Editorial Policy v2.0のdocs/ai/editorial-policy.md・policies/editorial.md。`config/upstream-policy.json`で5文書のcommitと各hashを固定し、既存ローカルcheckoutの固定Git内容を読む。編集規約は技術記事とその編集・引継ぎに適用し、一般の実装タスクの出力形式を記事形式に変えない。本文をこのrepoへ複製管理しない。旧 [`policies.md`](policies.md) v1.0はhash固定の履歴として保全し、現在の共通本文として二重注入しない。開始時に次を実行し、検証済みの本文・version・SHA-256を実際に受け取ってからpolicy依存の作業へ適用する。
 
 ```bash
 python3 -B scripts/policy_context.py --format inspect

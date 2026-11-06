@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -52,6 +53,11 @@ class PolicyRunnerTests(unittest.TestCase):
         self.assertIn(self.bundle.sha256, text)
         self.assertIn(runner_module.RESULT_INSTRUCTIONS, text)
         self.assertEqual(params['approvalPolicy'], 'never')
+        for name in ['docs/ai/editorial-policy.md','policies/editorial.md']:
+            self.assertEqual(text.count('--- UPSTREAM '+name+' ---\n'),1)
+            self.assertIn(name,self.bundle.metadata()['upstream']['files'])
+        self.assertIn('# Editorial Policy v2.0 — Reader First, Evidence Always',text)
+        self.assertIn('The sole authoritative editorial standard is',text)
 
     def test_fresh_thread_contains_full_policy_and_provenance(self):
         task = self.runner.run(self.runner.store.submit('original task',acceptance=self.acceptance),5)
@@ -79,6 +85,23 @@ class PolicyRunnerTests(unittest.TestCase):
         self.assertEqual(self.launches,[])
         self.assertEqual(self.runner.store.execution(task['active_execution_id'])['dispatched'],0)
 
+    def test_missing_editorial_pin_prevents_dispatch_with_the_real_loader(self):
+        project=self.root/'policy-project'
+        (project/'config').mkdir(parents=True);(project/'policies').mkdir()
+        for name in ['policies.md','policies/manifest.json','config/policy.json']:
+            shutil.copyfile(PROJECT/name,project/name)
+        original=json.loads((PROJECT/'config/upstream-policy.json').read_text())
+        for name in ['docs/ai/editorial-policy.md','policies/editorial.md']:
+            with self.subTest(name=name):
+                pin=json.loads(json.dumps(original));pin['files'].pop(name)
+                (project/'config/upstream-policy.json').write_text(json.dumps(pin))
+                with patch.object(runner_module,'PROJECT',project):
+                    task=self.runner.run(self.runner.store.submit('reject missing editorial policy'),5)
+                self.assertEqual(task['state'],'FAILED')
+                self.assertIn('document set differs',task['error'])
+                self.assertEqual(self.launches,[])
+                self.assertEqual(self.runner.store.execution(task['active_execution_id'])['dispatched'],0)
+
     def test_resume_conflict_stops_before_server_launch(self):
         source = self.runner.run(self.runner.store.submit('source',acceptance=self.acceptance),5)
         execution = self.runner.store.execution(source['active_execution_id'])
@@ -90,6 +113,26 @@ class PolicyRunnerTests(unittest.TestCase):
         self.assertEqual(task['state'],'FAILED')
         self.assertIn('conflicts',task['error'])
         self.assertEqual(len(self.launches),before)
+
+    def test_resume_from_pre_editorial_pin_stops_before_server_launch(self):
+        source=self.runner.run(self.runner.store.submit('old policy source',acceptance=self.acceptance),5)
+        self.assertEqual(source['state'],'COMPLETED',source['error'])
+        execution=self.runner.store.execution(source['active_execution_id'])
+        owner=json.loads(execution['owner'])
+        owner['common_policy']={
+            'version':'git:aeef6db1cc9680833277f76962044da0dae501b9',
+            'sha256':'3a6e2876cb93f60a0261bce0488bd67ac93053d52fb8fe6fd6821fe9489d4efd',
+        }
+        preserved=json.dumps(owner)
+        with self.runner.store.db:
+            self.runner.store.db.execute('UPDATE executions SET owner=? WHERE id=?',(preserved,execution['id']))
+        before=len(self.launches)
+        task=self.runner.run(self.runner.store.submit('old policy resume',resume_of=source['id'],acceptance=self.acceptance),5)
+        self.assertEqual(task['state'],'FAILED')
+        self.assertIn('Resume policy conflicts',task['error'])
+        self.assertEqual(len(self.launches),before)
+        self.assertEqual(self.runner.store.execution(task['active_execution_id'])['dispatched'],0)
+        self.assertEqual(self.runner.store.execution(execution['id'])['owner'],preserved)
 
     def test_legacy_resume_is_labeled_and_receives_current_policy(self):
         source = self.runner.run(self.runner.store.submit('legacy',acceptance=self.acceptance),5)
