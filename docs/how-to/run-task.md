@@ -5,7 +5,7 @@ This how-to runs a read-only fixture task in a fresh, dedicated runtime's shared
 ## Prerequisites
 
 - The documented Linux environment and existing Codex CLI setup are available; see the [README](../../README.md#installation).
-- The pinned common-policy checkout is configured at the operator-selected path. The configured pin is `aeef6db1cc9680833277f76962044da0dae501b9`; the default path is `../ai-orchestration` relative to the repository root. Verify it with `python3 -B scripts/policy_context.py --format inspect`; see the [common-policy guide](../common-policy.md).
+- The pinned common-policy checkout is configured at the operator-selected path. The configured pin is `394bf5377c2b82bb6f660ca917192bdbe337bc85`; the default path is `../ai-orchestration` relative to the repository root. Verify it with `python3 -B scripts/policy_context.py --format inspect`; see the [common-policy guide](../common-policy.md).
 - `.runtime/docs-howto` is a new runtime directory with no existing task data. Use another unused name if needed.
 - The acceptance fixture is tracked at `examples/read-fixture.acceptance.json`.
 

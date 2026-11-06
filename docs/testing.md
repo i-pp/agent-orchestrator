@@ -58,3 +58,19 @@ The host was Ubuntu 26.04.1 LTS, x86_64, Python 3.14.4. Checks used a temporary 
 - The live `run` command was not attempted. It requires the isolation preflight and may use the existing subscription. Do not treat the blocked `check` as permission to bypass isolation.
 
 [Follow-up issue #2](https://github.com/i-pp/agent-orchestrator/issues/2) tracks canonical-origin checkout verification and the live execution boundary. The API-materialized, hash-verified checkout and pinned-policy read succeeded, but this environment could not verify a canonical Git remote.
+
+## Editorial Policy v2 runtime verification (2026-11-06)
+
+The new bundle selects accepted `ai-orchestration` commit `394bf5377c2b82bb6f660ca917192bdbe337bc85`. It adds the authoritative Editorial Policy v2.0 and its workflow supplement to the three common-governance documents. The earlier inspection record above describes the previous three-document pin; it remains historical evidence.
+
+On the dedicated Policy v2 worktree, `python3 -B scripts/policy_context.py --format inspect` exited 0 against the existing canonical checkout. All five Git objects matched their pinned SHA-256 and Git blob SHA. The aggregate SHA-256 was `e8a458430fb66791300c942d6eb49e967a184989b858ec597b7c0b22541cf0ce`. Metadata reported canonical origin, unchanged clean checkout HEAD, `working_tree_body_used=false`, and `automatic_network=false`. A Git-ignored local checkout configuration selected that exact commit; other machines must configure an existing checkout as described in the [common-policy guide](common-policy.md).
+
+Run the focused regression checks after configuring the pinned checkout:
+
+```bash
+PYTHONPATH=tests python3 -B -m unittest test_common_policy test_common_policy_acceptance test_upstream_policy test_policy_runner -v
+```
+
+All 57 tests passed in the selected executor. They cover exact source hashes, required editorial documents, changed/missing Git objects, immutable context revalidation, full text delivered once to fresh and resumed threads, missing editorial pins preventing dispatch through the real loader, and old recorded policy versions preventing resume before peer launch. Historical owner metadata remains unchanged.
+
+The protocol checks use `tests/fake_codex.py`, a test-owned runtime, and a version-probe stub. They do not invoke a live Codex model or create nested isolation. This evidence does not establish model compliance, article acceptance, publication readiness, or deployment. The live daemon, AceIS notification worktree, and existing task databases were not used for these checks.

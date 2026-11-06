@@ -127,4 +127,46 @@ class UpstreamTests(unittest.TestCase):
         metadata=json.loads(loaded.provenance_json);metadata['files'][FILES[0]]['sha256']='0'*64
         with self.assertRaises(PolicyError):developer_instructions(loaded._replace(provenance_json=json.dumps(metadata)))
 
+    def test_editorial_documents_are_required_and_cannot_fall_back_to_three_files(self):
+        for name in ['docs/ai/editorial-policy.md','policies/editorial.md']:
+            with self.subTest(name=name):
+                pin=json.loads(json.dumps(self.pin));pin['files'].pop(name)
+                (self.root/'config/upstream-policy.json').write_text(json.dumps(pin))
+                with self.assertRaisesRegex(PolicyError,'document set differs'):
+                    load_project_policy(self.root)
+
+    def test_changed_editorial_git_objects_and_context_are_rejected(self):
+        for name in ['docs/ai/editorial-policy.md','policies/editorial.md']:
+            with self.subTest(name=name):
+                # Select a real later commit, keeping the reviewed content pins.
+                # Moving the ref must not make changed editorial text acceptable.
+                path=self.clone/name;original=path.read_text()
+                path.write_text(original+'Unreviewed editorial change\n')
+                self.git('add',name);self.git('commit','-qm','Unreviewed editorial change')
+                self.override(checkout_commit=self.git('rev-parse','HEAD').strip())
+                with self.assertRaisesRegex(PolicyError,'document hash mismatch'):
+                    load_project_policy(self.root)
+                (self.root/'config/policy-source.local.json').unlink()
+                loaded=load_project_policy(self.root)
+                meta=json.loads(loaded.provenance_json)
+                meta['files'][name]['sha256']='0'*64
+                with self.assertRaisesRegex(PolicyError,'document hash mismatch'):
+                    developer_instructions(loaded._replace(provenance_json=json.dumps(meta)))
+                path.write_text(original)
+                self.git('add',name);self.git('commit','-qm','Restore fixture editorial text')
+
+    def test_missing_editorial_git_object_is_not_optional(self):
+        for name in ['docs/ai/editorial-policy.md','policies/editorial.md']:
+            with self.subTest(name=name):
+                path=self.clone/name;original=path.read_text();path.unlink()
+                self.git('add',name);self.git('commit','-qm','Fixture missing editorial file')
+                self.override(checkout_commit=self.git('rev-parse','HEAD').strip())
+                before=(self.root/'config/upstream-policy.json').read_bytes()
+                with self.assertRaises(PolicyError):
+                    load_project_policy(self.root)
+                self.assertFalse(path.exists())
+                self.assertEqual((self.root/'config/upstream-policy.json').read_bytes(),before)
+                path.write_text(original)
+                self.git('add',name);self.git('commit','-qm','Restore missing fixture file')
+
 if __name__=='__main__':unittest.main()

@@ -4,10 +4,10 @@
 
 ## 採用版と取得元
 
-- GitHub採用commit: `aeef6db1cc9680833277f76962044da0dae501b9`
-- version: `git:aeef6db1cc9680833277f76962044da0dae501b9`（原文に数値版がないためcommitを版とする）
-- 本文集合のSHA-256: `3a6e2876cb93f60a0261bce0488bd67ac93053d52fb8fe6fd6821fe9489d4efd`
-- 正本3文書: docs/ai/orchestration.md、docs/ai/policies.md、agents/README.md
+- GitHub採用commit: `394bf5377c2b82bb6f660ca917192bdbe337bc85`
+- version: `git:394bf5377c2b82bb6f660ca917192bdbe337bc85`（bundle全体はcommitで識別し、編集正本の文書版は2.0）
+- 本文集合のSHA-256: `e8a458430fb66791300c942d6eb49e967a184989b858ec597b7c0b22541cf0ce`
+- 正本5文書: docs/ai/orchestration.md、docs/ai/policies.md、agents/README.md、docs/ai/editorial-policy.md、policies/editorial.md
 
 `config/upstream-policy.json`が取得元・commit・文書ごとのSHA-256/Git blob SHAを固定し、`config/policy.json`が新正本の採用を必須化する。実行時にbranchの最新版を追わず、ネットワーク・fetch・clone・copyを追加しない。指定したローカルGit objectから全文を読み、各hashと本文集合hashを検証する。
 
@@ -19,7 +19,7 @@ portableな既定は`../ai-orchestration`で、**agent-orchestratorのproject ro
 
 通常は正本と一致するoriginと、採用commitのGit objectを持つ既存cloneを使う。ローカルの配置例は存在を仮定しない。まずremote・HEAD・dirtyを読み取って確かめる。ユーザーの未commit変更をreset/pullで上書きしたり、別cloneを自動作成したりしない。
 
-既存の並行作業repoにoriginやGitHub commit objectがなくても、**operatorがローカルcommitを明示し、固定3文書の全bytesがGitHub pinと一致する場合だけ**、内容が等価なcarrierとして参照できる。originが確認できたと表示せず、canonical commit・実際の読込commit・HEAD・dirty・origin_verified=falseを別々に記録する。別repoの内容を信用してpinを更新する機能ではない。
+既存の並行作業repoにoriginやGitHub commit objectがなくても、**operatorがローカルcommitを明示し、固定5文書の全bytesがGitHub pinと一致する場合だけ**、内容が等価なcarrierとして参照できる。originが確認できたと表示せず、canonical commit・実際の読込commit・HEAD・dirty・origin_verified=falseを別々に記録する。別repoの内容を信用してpinを更新する機能ではない。
 
 `config/policy-source.local.json`はGit除外する。必要なら[設定例](../examples/policy-source-checkout.example.json)を参考に、実在するpathと40桁commitを明示する。これは配置設定でありcredentialを含めない。
 
@@ -46,6 +46,18 @@ python3 -B scripts/policy_context.py --format packet --target dot --task '目的
 
 不達、commit/版/hash不一致、壊れたsource設定、symlink等はPolicyErrorとなり、policy依存のdispatchをモデル開始前に止める。診断用の読み取りや独立した安全な編集まで止める意味ではない。直接の上位指示はこの正本より優先する。packet組立ては自動配送や、親dotからの直接呼出し成功の証明ではない。
 
+## Editorial Policy v2.0の適用と切替
+
+共通統治の3文書に、技術記事の編集正本 `docs/ai/editorial-policy.md` と運用補足 `policies/editorial.md` を加えた。5文書すべてを同一の採用commitから取得し、文書別hashと本文集合hashを検証する。v2.0は編集正本の文書版であり、旧root `policies.md` v1.0をv2へ書き換えたという意味ではない。
+
+技術記事の作成・編集・引継ぎでは、Reader First、事実と証拠の保持、技術レビューと編集レビューの分離、受理済みBの凍結後にAを作る境界を適用する。一般の実装タスクの出力形式は記事形式へ変えない。独立したFace Cへ共有ポリシーやSkillを渡さず、連絡・公開・mergeの権限を追加しない。
+
+このruntimeが注入するのは固定した5文書の全文だけである。参照先の記事用Skill・例文・`load_policy.py --show`は正本checkout側のパスであり、runnerの作業ディレクトリに導入されたとは扱わない。記事作業で必要なら、権限内で固定commitの参照資料を別途読み、その版とhashを記録する。本文注入・CLI packet・模擬peerの成功だけでは記事の品質、モデルの遵守、記事の受理や公開を保証しない。
+
+既存の `config/policy-source.local.json` で `checkout_commit` を明示している場合も、新pinと5文書の全bytesが一致するcommitをoperatorが選び直す。古い3文書だけの設定や欠落・hash不一致はfallbackせず停止する。前回のversion/hashが記録済みで異なるresumeもモデル開始前に拒否する。旧owner metadataや凍結済み原稿のpolicy bindingを更新せず、新しくレビューしたタスクとして開始する。既存のpolicy metadataがないresumeの扱いは従来どおり `legacy-unpinned` として記録する。
+
+この変更の採用はコードのreview/mergeと対象環境への配備を経て行う。稼働中のdaemon、AceIS通知開発、既存タスク、認証やglobal configをこの文書の更新だけで切り替えない。
+
 ## 旧v1.0との差分と扱い
 
 旧`policies.md`は利用者原文v1.0（SHA-256 `8fede5f946fd944485e7095ea27cb4923fb97ebf466d1e4b355ad21a50a00286`）を変更せず、manifestとともに履歴として残す。採用設定は旧hashも検査するが、現在の共通本文として二重注入しない。二つの正本を並行改訂しない。
@@ -53,7 +65,7 @@ python3 -B scripts/policy_context.py --format packet --target dot --task '目的
 意味のある差は次のとおり。
 
 | 差 | 今回の扱い |
-|---|---|
+| --- | --- |
 | 共通統治とruntime実装の管理repoを明確に分離 | 共通本文は正本へ集約し、こちらは読込と実行検証を所有 |
 | 旧S0〜S3に対し新正本はRoutine/Controlled/High impactの3区分 | publication/production/credential/privacy/費用等の重大影響は具体的なユーザー承認が必要。既に得た承認を再要求しない |
 | ChatGPT/Dot/各Agentの役割は追加権限を与えないと明示 | 設計回答や委譲を承認と混同しない |
@@ -62,6 +74,6 @@ python3 -B scripts/policy_context.py --format packet --target dot --task '目的
 
 ## 検証範囲
 
-実local checkoutの固定3文書を読込み、採用commit/hashとローカルcommit/dirtyを確認する。fixture Git repoでは正常・不達・dirty保全・異なるHEAD・等価ローカルcommit・改ざん・版不一致・path解決を検査する。文書別hashとsection境界はcontext組立て時にも再検査する。
+実local checkoutの固定5文書を読込み、採用commit/hashとローカルcommit/dirtyを確認する。fixture Git repoでは正常・不達・dirty保全・異なるHEAD・等価ローカルcommit・改ざん・版不一致・path解決を検査する。文書別hashとsection境界はcontext組立て時にも再検査する。
 
 Runner→模擬App Server peerでは実際のdeveloperInstructions・owner metadata・失敗前停止・resumeを検査する。実モデルへの新しい推論や、すべての環境での自動遵守を確認したとは扱わない。中央repoを編集する試験、namespace追加作成、認証変更は行わない。
