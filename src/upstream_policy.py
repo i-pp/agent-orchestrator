@@ -11,7 +11,10 @@ from common_policy import PolicyError,SourcePolicyBundle,_json,_path,_utf8,_sha2
 REPOSITORY='i-pp/ai-orchestration'
 GIT_URL='git@github.com:i-pp/ai-orchestration.git'
 HTTPS_URL='https://github.com/i-pp/ai-orchestration.git'
-FILES=('docs/ai/orchestration.md','docs/ai/policies.md','agents/README.md')
+FILES=(
+    'docs/ai/orchestration.md', 'docs/ai/policies.md', 'agents/README.md',
+    'docs/ai/editorial-policy.md', 'policies/editorial.md',
+)
 MAX_DOCUMENT=65536
 
 
