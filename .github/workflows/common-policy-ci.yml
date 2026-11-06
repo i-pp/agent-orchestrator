@@ -6,6 +6,7 @@ on:
       - "src/common_policy.py"
       - "src/upstream_policy.py"
       - "src/codex_pipeline.py"
+      - "src/codex_host.py"
       - "src/pipeline_policy_migration.py"
       - "scripts/pipeline_policy_migration.py"
       - "tests/test_*policy*.py"
