@@ -1,0 +1,38 @@
+name: MCP Events offline regressions
+
+on:
+  pull_request:
+    paths:
+      - "src/mcp_*.py"
+      - "src/notification_*.py"
+      - "src/local_principal.py"
+      - "src/os_providers.py"
+      - "src/private_state.py"
+      - "src/total_deadline.py"
+      - "src/codex_host.py"
+      - "src/codex_pipeline.py"
+      - "tests/test_mcp_*.py"
+      - "tests/test_notification_*.py"
+      - "tests/test_os_providers.py"
+      - ".github/workflows/mcp-events-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run fixture-only MCP Events and transport regressions
+        env:
+          PYTHONPATH: tests
+        run: >-
+          python3 -B -m unittest
+          test_mcp_events_lifecycle test_mcp_http_transport test_mcp_http_events_e2e
+          test_notification_outbox test_notification_runtime_composition
+          test_notification_host_bridge test_os_providers
+          test_codex_pipeline_adapter_extract test_pipeline_foundation_isolated
+          test_private_state_extract test_mcp_discovery.DiscoveryTests test_local_llm_mcp -v

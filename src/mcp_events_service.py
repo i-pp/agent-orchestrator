@@ -31,31 +31,27 @@ def event_definitions():
             data_required.extend(['action_required', 'reason_code'])
         definitions.append({
             'name': event_name,
-            'description': ('Notify when an authorized Codex task is blocked and needs user or operator action.'
-                            if action_required else
-                            f'Notify when an authorized Codex task enters {state}.'),
+            'description': (
+                f'Subscribe to a webhook notification when an authorized Codex task enters {state}'
+                + (' and needs user or operator action' if action_required else '') + '. '
+                'Use the task_id filter for the task the user asked to monitor.'),
             'delivery': ['webhook'],
             'inputSchema': {
                 'type': 'object',
-                'properties': {'task_id': _uuid_schema()},
+                'properties': {'task_id': {
+                    **_uuid_schema(),
+                    'description': 'UUID of the authorized Codex task to monitor for this event.',
+                }},
                 'required': ['task_id'],
                 'additionalProperties': False,
             },
             'payloadSchema': {
                 'type': 'object',
-                'properties': {
-                    'eventId': {'type': 'string', 'minLength': 1, 'maxLength': 128},
-                    'name': {'type': 'string', 'const': event_name},
-                    'timestamp': {'type': 'string', 'format': 'date-time'},
-                    'data': {
-                        'type': 'object',
-                        'properties': data_properties,
-                        'required': data_required,
-                        'additionalProperties': False,
-                    },
-                    'cursor': {'type': ['string', 'null'], 'maxLength': 32},
-                },
-                'required': ['eventId', 'name', 'timestamp', 'data', 'cursor'],
+                # MCP Events defines payloadSchema as the webhook envelope's
+                # `data` object. eventId/name/timestamp/cursor belong to the
+                # transport envelope and must not be repeated here.
+                'properties': data_properties,
+                'required': data_required,
                 'additionalProperties': False,
             },
         })
@@ -138,13 +134,11 @@ class McpEventsService:
         principal = self._principal(principal)
         if not self.enabled:
             return {'events': []}
-        for task_id in self.outbox.owned_task_ids(principal):
-            try:
-                if self.authorize_task(principal.identity, task_id) is True:
-                    return {'events': event_definitions()}
-            except Exception:
-                raise NotificationError('TASK_AUTHORIZATION_UNAVAILABLE') from None
-        return {'events': []}
+        # The catalog contains only static schemas, not task IDs or state. A
+        # connected principal must be able to discover these definitions
+        # before its first task exists; the subscribe path authorizes the
+        # requested task against both the source ledger and durable owner ACL.
+        return {'events': event_definitions()}
 
     def subscribe(self, params, principal):
         if not self.enabled:

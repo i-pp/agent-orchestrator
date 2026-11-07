@@ -467,7 +467,8 @@ class Adapter:
                             except Exception:
                                 # The operation may already have committed; never replay it here.
                                 data['access_binding'] = 'UNAVAILABLE'
-                if (name == 'codex_task_submit' and self.events_enabled and not failed
+                if (name in ('codex_task_submit', 'codex_chat_store')
+                        and self.events_enabled and not failed
                         and isinstance(data, dict)):
                     task_id = data.get('task_id') or data.get('id')
                     if task_id:

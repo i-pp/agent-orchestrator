@@ -144,14 +144,35 @@ class EventLifecycleTests(unittest.TestCase):
             'RESUME_SCOPE_MISMATCH'}))
         definition = next(event for event in event_definitions()
                           if event['name'] == EVENT_NAMES['task_blocked'][0])
-        data = definition['payloadSchema']['properties']['data']
-        self.assertEqual(data['properties']['state'], {'type': 'string', 'const': 'BLOCKED'})
-        self.assertEqual(data['properties']['action_required'], {'type': 'boolean', 'const': True})
-        self.assertEqual(data['properties']['reason_code']['enum'], sorted(BLOCKED_REASON_CODES))
-        self.assertEqual(set(data['required']), {
+        payload = definition['payloadSchema']
+        self.assertEqual(payload['properties']['state'], {'type': 'string', 'const': 'BLOCKED'})
+        self.assertEqual(payload['properties']['action_required'], {'type': 'boolean', 'const': True})
+        self.assertEqual(payload['properties']['reason_code']['enum'], sorted(BLOCKED_REASON_CODES))
+        self.assertEqual(set(payload['required']), {
             'task_id', 'state', 'action_required', 'reason_code'})
-        self.assertFalse(data['additionalProperties'])
+        self.assertFalse(payload['additionalProperties'])
+        self.assertNotIn('data', payload['properties'])
+        self.assertNotIn('eventId', payload['properties'])
+        self.assertIn('webhook notification', definition['description'])
+        self.assertIn('task_id filter', definition['description'])
+        self.assertEqual(definition['inputSchema']['properties']['task_id']['format'], 'uuid')
+        self.assertIn('task to monitor', definition['inputSchema']['properties']['task_id']['description'])
         self.assertIn('user or operator action', definition['description'])
+
+    def test_payload_schema_matches_callback_data_not_envelope(self):
+        for definition in event_definitions():
+            with self.subTest(event=definition['name']):
+                schema = definition['payloadSchema']
+                self.assertEqual(schema['type'], 'object')
+                self.assertIn('task_id', schema['properties'])
+                self.assertIn('state', schema['properties'])
+                self.assertNotIn('eventId', schema['properties'])
+                self.assertNotIn('name', schema['properties'])
+                self.assertNotIn('timestamp', schema['properties'])
+                self.assertNotIn('data', schema['properties'])
+                self.assertNotIn('cursor', schema['properties'])
+                self.assertEqual(set(schema['required']) & {'task_id', 'state'},
+                                 {'task_id', 'state'})
 
     def test_events_are_advertised_only_when_trusted_service_is_configured(self):
         tmp, disabled = self._adapter()
@@ -177,8 +198,9 @@ class EventLifecycleTests(unittest.TestCase):
             enabled.audit.close()
             tmp.cleanup()
 
-    def test_legacy_task_without_owner_binding_stays_notification_disabled(self):
-        self.assertEqual(self.service.list_events(OWNER), {'events': []})
+    def test_catalog_is_discoverable_before_first_owned_task_but_subscription_is_denied(self):
+        self.assertEqual({entry['name'] for entry in self.service.list_events(OWNER)['events']},
+                         {name for name, _ in EVENT_NAMES.values()})
         with self.assertRaisesRegex(NotificationError, 'TASK_NOT_AUTHORIZED'):
             self.service.subscribe(self._subscription_params(), OWNER)
         self.assertFalse(self.outbox.task_owned_by(TASK, OWNER))
@@ -397,6 +419,61 @@ class EventLifecycleTests(unittest.TestCase):
             self.service.authorize_task = original_authorizer
             adapter.audit.close()
             temp_runtime.cleanup()
+
+    def _call_local_chat_store(self, *, principal_provider=lambda: OWNER,
+                               pipeline_result=None):
+        calls = []
+
+        class FakePipeline:
+            def dispatch(inner_self, name, arguments):
+                calls.append((name, dict(arguments)))
+                return dict(pipeline_result or {'id': TASK, 'state': 'STORED'})
+
+        parent = PROJECT / '.runtime'
+        parent.mkdir(mode=0o700, exist_ok=True)
+        os.chmod(parent, 0o700)
+        temp_runtime = tempfile.TemporaryDirectory(dir=parent, prefix='events-chat-store-')
+        self.addCleanup(temp_runtime.cleanup)
+        root = Path(temp_runtime.name)
+        (root / 'logs').mkdir(mode=0o700)
+        adapter = Adapter(root, allow_codex_pipeline=True, pipeline=FakePipeline(),
+                          events_service=self.service, principal_provider=principal_provider)
+        self.addCleanup(adapter.audit.close)
+        reply = self._rpc(adapter, 'tools/call', {'name': 'codex_chat_store',
+            'arguments': {'thread_id': THREAD, 'prompt': 'private stored prompt',
+                          'request_key': 'chat-store-001'}})
+        self.assertEqual([name for name, _ in calls], ['codex_chat_store'])
+        self.assertNotIn('private stored prompt', adapter.audit_path.read_text())
+        return reply['result']
+
+    def test_local_chat_store_binds_owner_before_queue_or_subscription(self):
+        reply = self._call_local_chat_store()
+        self.assertFalse(reply['isError'])
+        self.assertEqual(reply['structuredContent']['data']['notification_binding'], 'BOUND')
+        self.assertTrue(self.outbox.task_owned_by(TASK, OWNER))
+        self.assertNotIn(OWNER.identity, json.dumps(reply))
+        subscription = self.service.subscribe(self._subscription_params(), OWNER)
+        self.assertIn('id', subscription)
+
+    def test_local_chat_store_without_principal_never_binds_an_owner(self):
+        reply = self._call_local_chat_store(
+            principal_provider=lambda: (_ for _ in ()).throw(RuntimeError('no auth')))
+        self.assertFalse(reply['isError'])
+        self.assertEqual(reply['structuredContent']['data']['notification_binding'], 'UNAVAILABLE')
+        self.assertFalse(self.outbox.task_owned_by(TASK, OWNER))
+
+    def test_local_chat_store_binding_failure_never_replays_or_rebinds(self):
+        self.service.authorize_task = lambda principal, task_id: False
+        reply = self._call_local_chat_store()
+        self.assertFalse(reply['isError'])
+        self.assertEqual(reply['structuredContent']['data']['notification_binding'], 'UNAVAILABLE')
+        self.assertFalse(self.outbox.task_owned_by(TASK, OWNER))
+
+    def test_failed_local_chat_store_never_binds_an_owner(self):
+        reply = self._call_local_chat_store(pipeline_result={'id': TASK, 'status': 'FAILED'})
+        self.assertTrue(reply['isError'])
+        self.assertNotIn('notification_binding', reply['structuredContent']['data'])
+        self.assertFalse(self.outbox.task_owned_by(TASK, OWNER))
 
     def test_callback_challenge_failure_is_protocol_error_and_stops_delivery(self):
         self.service = self._service(lambda request: {
