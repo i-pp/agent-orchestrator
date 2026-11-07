@@ -1,6 +1,7 @@
 """Local delivery boundaries: recovery, deduplication and uncertain results."""
 from contextlib import closing
 import importlib.util
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -15,6 +16,7 @@ PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / 'src'))
 from desktop_notifications import DesktopNotificationQueue, FreedesktopSender
 from notification_outbox import NotificationError
+from codex_pipeline import LEDGER_BYTES
 
 TASK = '00000000-0000-4000-8000-000000000999'
 
@@ -101,6 +103,32 @@ class DesktopNotificationsTests(unittest.TestCase):
         self.sender.assert_not_called()
         self.assertEqual(self.queue.summary()['delivery_states'], {'UNKNOWN': 1})
 
+    def test_concurrent_delivery_lock_returns_busy_without_sending(self):
+        self.queue.initialize()
+        self.append('task_completed')
+        fd = os.open(self.queue.lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.assertEqual(self.queue.run_once(self.sender), {'status': 'BUSY'})
+            self.sender.assert_not_called()
+        finally:
+            os.close(fd)
+        self.assertEqual(self.queue.run_once(self.sender)['delivery_states'], {'DELIVERED': 1})
+
+    def test_known_not_sent_retry_budget_becomes_failed_without_more_sends(self):
+        queue = DesktopNotificationQueue(self.source, self.destination,
+                                         clock=lambda: self.now[0], max_attempts=2)
+        queue.initialize()
+        self.append('task_failed')
+        unavailable = Mock(return_value={'status': 'RETRY'})
+        self.assertEqual(queue.run_once(unavailable)['delivery_states'], {'RETRY': 1})
+        self.now[0] += 1
+        self.assertEqual(queue.run_once(unavailable)['delivery_states'], {'FAILED': 1})
+        self.now[0] += 1000
+        queue.run_once(self.sender)
+        self.sender.assert_not_called()
+        self.assertEqual(unavailable.call_count, 2)
+
     def test_interrupted_send_is_recovered_as_unknown(self):
         self.queue.run_once(self.sender)
         self.append('task_cancelled')
@@ -121,6 +149,33 @@ class DesktopNotificationsTests(unittest.TestCase):
         with self.assertRaisesRegex(NotificationError, 'DESKTOP_SOURCE_CHANGED'):
             self.queue.run_once(self.sender)
         self.assertEqual(self.queue.summary()['delivery_states'], {'DELIVERED': 1})
+
+    def test_schema_two_history_above_8192_events_initializes_and_recovers(self):
+        self.events = [{'seq': i, 'kind': 'task_completed', 'task_id': TASK,
+                        'time': self.now[0]} for i in range(1, 8194)]
+        self.write()
+        with closing(sqlite3.connect(self.source)) as db:
+            raw = db.execute('SELECT body FROM ledger WHERE id=1').fetchone()[0]
+            state = json.loads(raw)
+            state['schema'] = 2
+            encoded = json.dumps(state)
+            self.assertLess(len(encoded.encode()), LEDGER_BYTES)
+            db.execute('UPDATE ledger SET body=? WHERE id=1', (encoded,))
+            db.commit()
+        self.queue.initialize()
+        self.assertEqual(self.queue.summary()['cursor'], 8193)
+        self.append('task_failed')
+        self.make_queue().run_once(self.sender)
+        self.sender.assert_called_once()
+        self.assertEqual(self.queue.summary()['cursor'], 8194)
+        self.assertEqual(self.queue.summary()['delivery_states'], {'DELIVERED': 1})
+
+    def test_source_history_is_bounded_by_actual_pipeline_byte_limit(self):
+        with closing(sqlite3.connect(self.source)) as db:
+            db.execute('UPDATE ledger SET body=? WHERE id=1', (' ' * (LEDGER_BYTES + 1),))
+            db.commit()
+        with self.assertRaisesRegex(NotificationError, 'INVALID_EVENT_LEDGER'):
+            self.queue.initialize()
 
     def test_sender_distinguishes_preflight_failure_from_unknown_notify_result(self):
         payload = {'data': {'task_id': TASK, 'state': 'COMPLETED'}, 'timestamp': '2026-11-06T00:00:00Z'}

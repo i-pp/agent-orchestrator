@@ -17,6 +17,7 @@ import time
 
 from notification_outbox import NotificationError, _event_payload, _recognized_notification_source
 from private_state import _private
+from codex_pipeline import LEDGER_BYTES
 
 
 class FreedesktopSender:
@@ -111,11 +112,14 @@ class DesktopNotificationQueue:
         _private(self.source)
         with closing(sqlite3.connect(self.source.as_uri() + '?mode=ro', uri=True, timeout=2)) as db:
             raw = db.execute('SELECT body FROM ledger WHERE id=1').fetchone()
-        if raw is None or len(raw[0]) > 16 * 1024 * 1024:
+        if raw is None:
             raise NotificationError('INVALID_EVENT_LEDGER')
-        state = json.loads(raw[0])
+        body = raw[0].encode('utf-8') if isinstance(raw[0], str) else raw[0]
+        if not isinstance(body, bytes) or len(body) > LEDGER_BYTES:
+            raise NotificationError('INVALID_EVENT_LEDGER')
+        state = json.loads(body)
         events = state.get('events') if isinstance(state, dict) else None
-        if (not isinstance(events, list) or len(events) > 8192
+        if (not isinstance(events, list)
                 or any(not isinstance(e, dict) or type(e.get('seq')) is not int
                        or e['seq'] != i for i, e in enumerate(events, 1))):
             raise NotificationError('INVALID_EVENT_LEDGER')
