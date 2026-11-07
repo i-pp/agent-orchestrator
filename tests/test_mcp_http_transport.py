@@ -146,6 +146,86 @@ class MCPHTTPTransportTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(json.loads(body)['error']['code'], -32020)
 
+    def test_event_name_header_matches_for_subscribe_and_unsubscribe(self):
+        for method in ('events/subscribe', 'events/unsubscribe'):
+            with self.subTest(method=method):
+                self.adapter.events_service.last_principal = None
+                status, _, body = self._call(
+                    self._modern(method, {'name': 'codex.task.completed'}),
+                    protocol=REQUEST_PROTOCOL, method_header=method,
+                    extra_headers={'Mcp-Name': 'codex.task.completed'})
+                self.assertEqual(status, 200, body.decode())
+                self.assertEqual(json.loads(body)['result']['method'], method)
+                self.assertEqual(self.adapter.events_service.last_principal,
+                                 current_local_principal())
+
+
+    def test_headerless_events_remain_compatible(self):
+        # Retain the existing ChatGPT integration profile as well as accepting
+        # the newer draft's event routing header when a client provides it.
+        for method in ('events/subscribe', 'events/unsubscribe'):
+            with self.subTest(method=method):
+                status, _, body = self._call(
+                    self._modern(method, {'name': 'codex.task.completed'}),
+                    protocol=REQUEST_PROTOCOL, method_header=method)
+                self.assertEqual(status, 200, body.decode())
+
+
+    def test_event_name_header_mismatch_is_rejected_before_adapter_audit(self):
+        for method in ('events/subscribe', 'events/unsubscribe'):
+            for header in ('codex.task.failed', '=?base64?not-valid!?=', 'x' * 8193):
+                with self.subTest(method=method, header_length=len(header)):
+                    self.adapter.events_service.last_principal = None
+                    before = self.adapter.audit_path.read_bytes()
+                    status, _, body = self._call(
+                        self._modern(method, {'name': 'codex.task.completed'}),
+                        protocol=REQUEST_PROTOCOL, method_header=method,
+                        extra_headers={'Mcp-Name': header})
+                    self.assertEqual(status, 400)
+                    self.assertEqual(json.loads(body)['error']['code'], -32020)
+                    self.assertIsNone(self.adapter.events_service.last_principal)
+                    self.assertEqual(self.adapter.audit_path.read_bytes(), before)
+
+
+    def test_event_name_header_decodes_base64_non_ascii_event_names(self):
+        name = '記事.更新'
+        encoded = '=?base64?' + base64.b64encode(name.encode()).decode() + '?='
+        for method in ('events/subscribe', 'events/unsubscribe'):
+            with self.subTest(method=method):
+                status, _, body = self._call(
+                    self._modern(method, {'name': name}), protocol=REQUEST_PROTOCOL,
+                    method_header=method, extra_headers={'Mcp-Name': encoded})
+                self.assertEqual(status, 200, body.decode())
+
+
+    def test_event_name_header_does_not_bypass_http_authentication(self):
+        method = 'events/subscribe'
+        message = self._modern(method, {'name': 'codex.task.completed'})
+        raw = json.dumps(message).encode()
+        headers = {**self.common_headers, 'Content-Length': str(len(raw)),
+                   'MCP-Protocol-Version': REQUEST_PROTOCOL, 'Mcp-Method': method,
+                   'Mcp-Name': 'codex.task.completed'}
+        self.adapter.events_service.last_principal = None
+        status, _, _ = McpHttpEndpoint(self.adapter, expected_port=8765).handle('POST', '/mcp', headers, raw)
+        self.assertEqual(status, 401)
+        self.assertIsNone(self.adapter.events_service.last_principal)
+        headers['Authorization'] = 'Bearer test-alice'
+        status, _, body = McpHttpEndpoint(self.adapter, expected_port=8765).handle('POST', '/mcp', headers, raw)
+        self.assertEqual(status, 401)
+        self.assertIsNone(self.adapter.events_service.last_principal)
+
+
+    def test_event_name_header_requires_a_valid_matching_body_name(self):
+        for params in ({}, {'name': None}, {'name': 42}):
+            with self.subTest(params=params):
+                status, _, body = self._call(
+                    self._modern('events/subscribe', params), protocol=REQUEST_PROTOCOL,
+                    method_header='events/subscribe',
+                    extra_headers={'Mcp-Name': 'codex.task.completed'})
+                self.assertEqual(status, 400)
+                self.assertEqual(json.loads(body)['error']['code'], -32020)
+
+
     def test_origin_host_and_remote_address_are_loopback_bound(self):
         request = self._modern('server/discover')
         status, _, _ = self._call(request, protocol=REQUEST_PROTOCOL,
