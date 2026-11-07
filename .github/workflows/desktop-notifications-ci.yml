@@ -1,0 +1,38 @@
+name: Desktop notification fallback
+
+on:
+  pull_request:
+    paths:
+      - "src/desktop_notifications.py"
+      - "src/runtime_scope.py"
+      - "scripts/desktop_notifications_worker.py"
+      - "tests/test_desktop_notifications*.py"
+      - "docs/desktop-notifications.md"
+      - "systemd/aceis-codex-desktop-notifications.service.example"
+      - ".github/workflows/desktop-notifications-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run offline desktop and notification regressions
+        env:
+          PYTHONPATH: tests
+        run: >-
+          python3 -B -m unittest
+          test_desktop_notifications test_desktop_notifications_worker
+          test_notification_outbox test_notification_runtime_composition
+          test_mcp_events_lifecycle test_notification_host_bridge -v
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "26.13.0"
+      - name: Lint desktop operation documentation
+        run: npx --yes --package=markdownlint-cli2@0.23.3 markdownlint-cli2 docs/desktop-notifications.md
+      - name: Check repository-local Markdown links
+        run: python3 scripts/check_markdown_links.py

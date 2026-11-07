@@ -1,0 +1,19 @@
+[Unit]
+Description=AceIS local Codex desktop notifications
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+# Replace all three example paths before installation. Do not run two workers.
+WorkingDirectory=/absolute/path/to/agent-orchestrator
+ExecStart=/usr/bin/python3 -B /absolute/path/to/agent-orchestrator/scripts/desktop_notifications_worker.py --runtime /absolute/path/to/runtime-project/.runtime/runtime-name --runtime-project-root /absolute/path/to/runtime-project
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=15
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=graphical-session.target
