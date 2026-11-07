@@ -35,4 +35,4 @@ jobs:
           test_notification_outbox test_notification_runtime_composition
           test_notification_host_bridge test_os_providers
           test_codex_pipeline_adapter_extract test_pipeline_foundation_isolated
-          test_private_state_extract test_mcp_discovery test_local_llm_mcp -v
+          test_private_state_extract test_mcp_discovery.DiscoveryTests test_local_llm_mcp -v
