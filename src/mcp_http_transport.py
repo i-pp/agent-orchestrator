@@ -298,17 +298,21 @@ class McpHttpEndpoint:
             return self._reply(400, self._error(identifier, -32020,
                                                 'MCP request headers do not match the JSON body'))
         expected_name = None
-        if request_method == 'tools/call':
+        event_name_method = request_method in ('events/subscribe', 'events/unsubscribe')
+        if request_method == 'tools/call' or event_name_method:
             expected_name = params.get('name')
         elif request_method == 'resources/read':
             expected_name = params.get('uri')
         elif request_method == 'prompts/get':
             expected_name = params.get('name')
         supplied_name = fields.get('mcp-name')
-        if request_method in ('tools/call', 'resources/read', 'prompts/get'):
+        if request_method in ('tools/call', 'resources/read', 'prompts/get') or event_name_method:
             decoded_name = _decode_mcp_name(supplied_name) if supplied_name is not None else None
             if (not isinstance(expected_name, str) or len(expected_name) > MAX_MCP_NAME
-                    or (protocol_header == REQUEST_PROTOCOL and supplied_name is None)
+                    # Preserve the existing headerless Events profile while
+                    # validating the newer draft's routing header when supplied.
+                    or (protocol_header == REQUEST_PROTOCOL and supplied_name is None
+                        and not event_name_method)
                     or (supplied_name is not None and decoded_name != expected_name)):
                 return self._reply(400, self._error(identifier, -32020,
                     'MCP request headers do not match the JSON body'))

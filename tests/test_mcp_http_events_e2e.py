@@ -81,11 +81,12 @@ class SubmitPipeline:
         self.write_state = write_state
 
     def dispatch(self, name, _arguments):
-        if name != 'codex_task_submit':
+        if name not in ('codex_task_submit', 'codex_chat_store'):
             raise AssertionError('unexpected pipeline tool')
-        self.write_state({'tasks': {TASK: {'id': TASK, 'state': 'QUEUED'}},
+        state = 'QUEUED' if name == 'codex_task_submit' else 'STORED'
+        self.write_state({'tasks': {TASK: {'id': TASK, 'state': state}},
                           'events': []})
-        return {'id': TASK, 'state': 'QUEUED'}
+        return {'id': TASK, 'state': state}
 
 
 class PipelineView:
@@ -104,6 +105,7 @@ class HttpEventsE2ETests(unittest.TestCase):
         os.chmod(runtime_parent, 0o700)
         self.temp = tempfile.TemporaryDirectory(prefix='http-events-e2e-', dir=runtime_parent)
         self.root = Path(self.temp.name)
+        self.event_name_header = False
         os.chmod(self.root, 0o700)
         (self.root / 'logs').mkdir(mode=0o700)
         self.source_db = self.root / 'codex-pipeline.sqlite3'
@@ -124,9 +126,7 @@ class HttpEventsE2ETests(unittest.TestCase):
 
     def http_call(self, endpoint, method, params, identifier):
         payload = dict(params)
-        payload['_meta'] = {VERSION_META: REQUEST_PROTOCOL, CAPABILITIES_META: {},
-                            'openai/subject': 'untrusted-client-supplied-user',
-                            'openai/session': 'untrusted-client-supplied-session'}
+        payload['_meta'] = {VERSION_META: REQUEST_PROTOCOL, CAPABILITIES_META: {}}
         message = {'jsonrpc': '2.0', 'id': identifier, 'method': method,
                    'params': payload}
         body = json.dumps(message, separators=(',', ':')).encode('utf-8')
@@ -138,7 +138,8 @@ class HttpEventsE2ETests(unittest.TestCase):
             'Mcp-Method': method,
             'Content-Length': str(len(body)),
         }
-        if method == 'tools/call':
+        if (method == 'tools/call' or self.event_name_header
+                and method in ('events/subscribe', 'events/unsubscribe')):
             headers['Mcp-Name'] = payload.get('name')
         status, _, response = endpoint.handle(
             'POST', '/mcp', headers, body, remote_addr='127.0.0.1')
@@ -146,6 +147,19 @@ class HttpEventsE2ETests(unittest.TestCase):
         return json.loads(response)
 
     def test_http_subscription_persists_and_delivers_one_synthetic_completion(self):
+        self._exercise_subscription_and_completion('codex_task_submit')
+
+    def test_http_chat_store_subscription_persists_before_queue_and_delivers_once(self):
+        self._exercise_subscription_and_completion('codex_chat_store')
+
+    def test_http_subscription_with_event_name_header_delivers_once(self):
+        self._exercise_subscription_and_completion('codex_task_submit', event_name_header=True)
+
+    def test_http_chat_store_with_event_name_header_delivers_once(self):
+        self._exercise_subscription_and_completion('codex_chat_store', event_name_header=True)
+
+    def _exercise_subscription_and_completion(self, creation_tool, *, event_name_header=False):
+        self.event_name_header = event_name_header
         resolver = BoundedResolver(FixtureResolver())
         sender = InMemorySender(resolver)
         providers = {
@@ -158,8 +172,8 @@ class HttpEventsE2ETests(unittest.TestCase):
         runtime = build_systemd_notification_runtime(
             self.root, events_transport=True,
             environ={EVENTS_ENABLE_ENV: '1'},
-            allow_single_user_local=True,
-            provider_loader=lambda **_kwargs: providers)
+            provider_loader=lambda **_kwargs: providers,
+            allow_single_user_local=True)
         self.assertTrue(runtime.enabled, runtime.disabled_reason)
 
         from mcp_adapter import Adapter
@@ -167,16 +181,18 @@ class HttpEventsE2ETests(unittest.TestCase):
                           pipeline=SubmitPipeline(self.write_state),
                           notification_runtime=runtime)
         self.assertTrue(runtime.events_service.bind_thread_owner(THREAD, OWNER))
-        endpoint = McpHttpEndpoint(
-            adapter, expected_port=8765, allow_single_user_local=True,
-            principal_provider=current_local_principal)
+        endpoint = McpHttpEndpoint(adapter, expected_port=8765,
+                                   allow_single_user_local=True,
+                                   principal_provider=current_local_principal)
         try:
             discovered = self.http_call(endpoint, 'server/discover', {}, 1)
             self.assertIn('events', discovered['result']['capabilities'])
 
             event_name = EVENT_NAMES['task_completed'][0]
+            listed_before_first_task = self.http_call(endpoint, 'events/list', {}, 2)
+            self.assertIn(event_name, {item['name'] for item in listed_before_first_task['result']['events']})
             submitted = self.http_call(endpoint, 'tools/call', {
-                'name': 'codex_task_submit',
+                'name': creation_tool,
                 'arguments': {'thread_id': THREAD, 'prompt': 'synthetic fixture',
                               'request_key': 'http-e2e-001'},
             }, 3)
@@ -186,6 +202,8 @@ class HttpEventsE2ETests(unittest.TestCase):
 
             listed = self.http_call(endpoint, 'events/list', {}, 4)
             self.assertIn(event_name, {item['name'] for item in listed['result']['events']})
+            event_definition = next(item for item in listed['result']['events']
+                                    if item['name'] == event_name)
 
             subscribed = self.http_call(endpoint, 'events/subscribe', {
                 'name': event_name,
@@ -217,6 +235,9 @@ class HttpEventsE2ETests(unittest.TestCase):
             self.assertEqual(payload['name'], event_name)
             self.assertEqual(payload['data'], {
                 'task_id': TASK, 'state': 'COMPLETED', 'thread_id': THREAD})
+            self.assertEqual(set(event_definition['payloadSchema']['properties']),
+                             set(payload['data']))
+            self.assertNotIn('data', event_definition['payloadSchema']['properties'])
             self.assertEqual(headers['webhook-id'], payload['eventId'])
             self.assertEqual(headers['X-MCP-Subscription-Id'], subscription_id)
             self.assertTrue(headers['webhook-signature'].startswith('v1,'))
@@ -227,8 +248,8 @@ class HttpEventsE2ETests(unittest.TestCase):
             restarted = build_systemd_notification_runtime(
                 self.root, events_transport=True,
                 environ={EVENTS_ENABLE_ENV: '1'},
-                allow_single_user_local=True,
-                provider_loader=lambda **_kwargs: providers)
+                    provider_loader=lambda **_kwargs: providers,
+                allow_single_user_local=True)
             self.assertTrue(restarted.enabled, restarted.disabled_reason)
             restarted_worker = restarted.worker_factory(
                 PipelineView(self.source_db, restarted.outbox))
@@ -237,6 +258,13 @@ class HttpEventsE2ETests(unittest.TestCase):
             self.assertEqual(len(sender.requests), 1)
             self.assertEqual(runtime.outbox.summary()['delivery_states'],
                              {'DELIVERED': 1})
+            stopped = self.http_call(endpoint, 'events/unsubscribe', {
+                'name': event_name,
+                'arguments': {'task_id': TASK},
+                'delivery': {'mode': 'webhook', 'url': CALLBACK},
+            }, 7)
+            self.assertNotIn('error', stopped)
+            self.assertEqual(runtime.outbox.summary()['active_subscriptions'], 0)
         finally:
             adapter.audit.close()
 
