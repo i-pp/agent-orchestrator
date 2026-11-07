@@ -1,0 +1,32 @@
+name: Common policy transitions
+
+on:
+  pull_request:
+    paths:
+      - "src/common_policy.py"
+      - "src/upstream_policy.py"
+      - "src/codex_pipeline.py"
+      - "src/codex_host.py"
+      - "src/pipeline_policy_migration.py"
+      - "scripts/pipeline_policy_migration.py"
+      - "tests/test_*policy*.py"
+      - "tests/test_pipeline_foundation_isolated.py"
+      - ".github/workflows/common-policy-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  policy:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run offline policy and transition regressions
+        env:
+          PYTHONPATH: tests
+        run: >-
+          python3 -B -m unittest
+          test_common_policy test_common_policy_acceptance test_upstream_policy
+          test_common_policy_migration test_pipeline_foundation_isolated -v

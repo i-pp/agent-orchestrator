@@ -69,25 +69,34 @@ def _ledger(conn):
 
 
 def _plan_shape(plan):
-    if (not isinstance(plan, dict) or set(plan) != PLAN_KEYS or type(plan['schema']) is not int
-            or plan['schema'] != 1 or not isinstance(plan['id'], str) or not re.fullmatch(KEY, plan['id'])
-            or plan['direction'] not in ['expand', 'rollback']
+    common = isinstance(plan, dict) and plan.get('schema') == 2
+    keys = PLAN_KEYS | {'new_common_hash'} if common else PLAN_KEYS
+    if (not isinstance(plan, dict) or set(plan) != keys or type(plan['schema']) is not int
+            or plan['schema'] not in [1, 2] or not isinstance(plan['id'], str) or not re.fullmatch(KEY, plan['id'])
+            or plan['direction'] not in (['adopt_common'] if common else ['expand', 'rollback'])
             or type(plan['time']) not in [int, float] or not 0 < plan['time'] < 10**12):
         _fail('UNSUPPORTED_MIGRATION_VERSION')
     for k in ['common_hash', 'old_file_sha256', 'new_file_sha256', 'old_policy_hash',
               'new_policy_hash', 'ledger_before_sha256', 'ledger_after_sha256']:
         if not isinstance(plan[k], str) or not re.fullmatch('[a-f0-9]{64}', plan[k]):
             _fail('INVALID_MIGRATION_HASH')
+    if common and (not isinstance(plan['new_common_hash'], str)
+            or not re.fullmatch('[a-f0-9]{64}', plan['new_common_hash'])):
+        _fail('INVALID_MIGRATION_HASH')
     policies = []
     for prefix in ['old', 'new']:
         raw = plan[prefix + '_raw']
         if not isinstance(raw, str) or len(raw.encode()) > 16384: _fail('INVALID_MIGRATION_POLICY')
         policy = validate_policy(_json(raw))
         if (_sha(raw.encode()) != plan[prefix + '_file_sha256']
-                or digest({'policy': policy, 'common': plan['common_hash']}) != plan[prefix + '_policy_hash']):
+                or digest({'policy': policy, 'common': plan.get('new_common_hash', plan['common_hash']) if prefix == 'new' else plan['common_hash']}) != plan[prefix + '_policy_hash']):
             _fail('MIGRATION_INTENT_HASH_MISMATCH')
         policies.append(policy)
     old, new = policies
+    if common:
+        if plan['old_raw'] != plan['new_raw']: _fail('MIGRATION_SCOPE_CHANGED')
+        if plan['common_hash'] == plan['new_common_hash']: _fail('EMPTY_POLICY_MIGRATION')
+        return old, new
     normal_adjustment = old['schema'] == new['schema'] == 2
     for k in (['workspaces', 'models'] if normal_adjustment else ['workspaces', 'concurrency', 'timeout_seconds']):
         if old[k] != new[k]: _fail('MIGRATION_SCOPE_CHANGED')
@@ -121,11 +130,12 @@ def _records(conn):
     if len(rows) > 32: _fail('MIGRATION_JOURNAL_CAPACITY')
     records = []
     for ident, version, phase, body in rows:
-        if version != 1 or phase not in ['PREPARED', 'COMMITTED', 'ABORTED'] or len(body.encode()) > 65536:
+        if version not in [1, 2] or phase not in ['PREPARED', 'COMMITTED', 'ABORTED'] or len(body.encode()) > 65536:
             _fail('UNSUPPORTED_MIGRATION_JOURNAL')
         item = _json(body)
         if (not isinstance(item, dict) or set(item) != {'plan', 'plan_sha256'}
-                or digest(item['plan']) != item['plan_sha256'] or ident != item['plan'].get('id')):
+                or digest(item['plan']) != item['plan_sha256'] or ident != item['plan'].get('id')
+                or item['plan'].get('schema') != version):
             _fail('MIGRATION_JOURNAL_HASH_MISMATCH')
         _plan_shape(item['plan'])
         records.append({'id': ident, 'state': phase, **item})
@@ -142,6 +152,7 @@ def _history(state, records):
         p = record['plan']
         expected = {k: p[k] for k in ['schema', 'id', 'old_file_sha256', 'new_file_sha256',
                                       'old_policy_hash', 'new_policy_hash', 'common_hash', 'direction']}
+        if p['schema'] == 2: expected['new_common_hash'] = p['new_common_hash']
         expected['plan_sha256'] = _history_hash(p)
         if entry != expected or (previous is not None and p['old_policy_hash'] != previous):
             _fail('UNKNOWN_POLICY_HISTORY')
@@ -220,6 +231,8 @@ def _transform(state, plan):
                                   'old_policy_hash', 'new_policy_hash', 'common_hash', 'direction']}
     # Exclude after-ledger fingerprint from the historical intent hash to avoid
     # a recursive hash definition; the journal separately pins the full plan.
+    if plan['schema'] == 2:
+        entry['new_common_hash'] = plan['new_common_hash']
     entry['plan_sha256'] = _history_hash(plan)
     result.setdefault(HISTORY, []).append(entry)
     if (_json(plan['new_raw'])['schema'] == _json(plan['old_raw'])['schema'] == 1
@@ -255,7 +268,7 @@ def _bindings(state, records, plan):
            for t in state['tasks'].values()): _fail('MIGRATION_UNKNOWN_TASK_BINDING')
 
 
-def plan_transition(runtime, candidate, common_hash, migration_id, *, direction='expand', now=None):
+def plan_transition(runtime, candidate, common_hash, migration_id, *, direction='expand', now=None, new_common_hash=None):
     root = _root(runtime)
     assert_migration_ready(root / DB)
     _private(Path(candidate), 16384)
@@ -273,6 +286,10 @@ def plan_transition(runtime, candidate, common_hash, migration_id, *, direction=
             'new_policy_hash': digest({'policy': _json(new_raw), 'common': common_hash}),
             'ledger_before_sha256': digest(state), 'ledger_after_sha256': '0' * 64,
             'time': time.time() if now is None else now}
+    if new_common_hash is not None:
+        if direction != 'expand': _fail('MIGRATION_SCOPE_CHANGED')
+        plan.update(schema=2, direction='adopt_common', new_common_hash=new_common_hash)
+        plan['new_policy_hash'] = digest({'policy': _json(new_raw), 'common': new_common_hash})
     _bindings(state, records, plan)
     plan['ledger_after_sha256'] = digest(_transform(state, plan))
     return plan
@@ -318,8 +335,8 @@ def apply_transition(runtime, plan, expected_plan_sha256):
                 if len(body.encode()) > 65536: _fail('MIGRATION_INTENT_CAPACITY')
                 conn.execute('CREATE TABLE IF NOT EXISTS ' + TABLE +
                              ' (id TEXT PRIMARY KEY,schema INTEGER NOT NULL,state TEXT NOT NULL,body TEXT NOT NULL)')
-                conn.execute('INSERT INTO ' + TABLE + ' VALUES (?,1,\'PREPARED\',?)',
-                             (plan['id'], body))
+                conn.execute('INSERT INTO ' + TABLE + ' VALUES (?,?,\'PREPARED\',?)',
+                             (plan['id'], plan['schema'], body))
                 conn.commit()
             except BaseException:
                 conn.rollback(); raise
@@ -393,8 +410,9 @@ def rebind_service_snapshot(runtime, previous, current_snapshot):
             or set(old_snapshot) != keys or set(current_snapshot) != keys
             or old_snapshot['pipeline_policy_sha256'] != plan['old_file_sha256']
             or current_snapshot['pipeline_policy_sha256'] != plan['new_file_sha256']
-            or current_snapshot['common_policy_sha256'] != plan['common_hash']
-            or any(old_snapshot[k] != current_snapshot[k] for k in keys - {'pipeline_policy_sha256'})):
+            or old_snapshot['common_policy_sha256'] != plan['common_hash']
+            or current_snapshot['common_policy_sha256'] != plan.get('new_common_hash', plan['common_hash'])
+            or any(old_snapshot[k] != current_snapshot[k] for k in keys - {'pipeline_policy_sha256', 'common_policy_sha256'})):
         _fail('SERVICE_BINDING_MIGRATION_MISMATCH')
     if any(not isinstance(value, str) or not re.fullmatch('[a-f0-9]{64}', value)
            for snapshot in [old_snapshot, current_snapshot] for value in snapshot.values()):

@@ -335,7 +335,10 @@ class HostGateway:
         if self.held or self.transport is not None or self.budget is not None:
             raise PipelineError('ABSENCE_REQUIRES_IDLE_EXECUTOR')
         current=self.pipeline._mutate(lambda s:json.loads(json.dumps(s)))
-        for tid in thread_ids:eligible(current,tid)
+        for tid in thread_ids:
+            if tid in current['threads']:
+                self.pipeline.assert_thread_policy(current, current['threads'][tid])
+            eligible(current,tid)
         if apply:
             receipt=getattr(self,'absence_receipt',None)
             if (not receipt or receipt['ids']!=thread_ids or receipt['ledger']!=digest(current)
@@ -404,6 +407,7 @@ class HostGateway:
         if (not thread or thread['active_task'] or not thread.get('remote_id')
                 or thread.get('archived') or thread.get('closing')):
             raise PipelineError('OWNED_IDLE_THREAD_REQUIRED')
+        self.pipeline.assert_thread_policy(state, thread)
         if any(op.get('kind')=='dispatch' for op in state['ops'].values()):
             raise PipelineError('TURN_DISPATCH_REQUIRES_SEPARATE_RECONCILIATION')
         self.require_host()
@@ -523,6 +527,11 @@ class HostGateway:
             raise
 
     def rpc(self, method, params):
+        if method == 'thread/resume':
+            state = self.pipeline._mutate(lambda s: json.loads(json.dumps(s)))
+            owned = [t for t in state['threads'].values() if t.get('remote_id') == params.get('threadId')]
+            if len(owned) != 1: raise PipelineError('THREAD_NOT_OWNED')
+            self.pipeline.assert_thread_policy(state, owned[0])
         self.connect()
         try: return self.protocol.request(method, params)
         except RpcError as error:

@@ -231,12 +231,24 @@ class Pipeline:
             self.notification_sync_error = 'OUTBOX_SYNC_FAILED'
             return {'status': 'RETRY_LATER', 'code': self.notification_sync_error}
 
+    def assert_thread_policy(self, s, t):
+        """Check native context identity without rewriting historical records."""
+        bound = t.get('common_policy_sha256')
+        if bound is None:
+            # Legacy records stay byte-for-byte intact. The first common-policy
+            # transition fixes their original identity without relabeling them.
+            adoption = next((p for p in s.get('policy_migrations', []) if p.get('schema') == 2), None)
+            bound = adoption['common_hash'] if adoption else self.common_hash
+        if bound != self.common_hash:
+            raise PipelineError('THREAD_POLICY_VERSION_CHANGED')
+
     def _thread(self, s, ident, *, idle=False):
         t = s['threads'].get(ident)
         if not t: raise PipelineError('THREAD_NOT_OWNED')
         if t['archived'] or t.get('closing') or not t.get('remote_id'): raise PipelineError('THREAD_NOT_READY')
         if t.get('native_context_state', 'READY') != 'READY':
             raise PipelineError('NATIVE_CONTEXT_RECONCILIATION_REQUIRED', 'UNKNOWN')
+        self.assert_thread_policy(s, t)
         if idle and t['active_task']: raise PipelineError('THREAD_BUSY')
         return t
 
@@ -379,7 +391,8 @@ class Pipeline:
             if self.policy['schema'] == 1 and len(s['threads']) >= self.policy['max_threads']: raise PipelineError('THREAD_CAPACITY')
             ident = str(uuid.uuid4())
             s['threads'][ident] = {'id': ident, 'remote_id': None, 'workspace': workspace, 'model': model,
-                                   'active_task': None, 'archived': False, 'closing': False}
+                                   'active_task': None, 'archived': False, 'closing': False,
+                                   'common_policy_sha256': self.common_hash}
             return {'thread_id': ident}
         def effect(_):
             result = self.client.request('thread/start', {'model': model, 'cwd': self.policy['workspaces'][workspace],
@@ -496,6 +509,7 @@ class Pipeline:
             if self.policy['schema'] == 1 and len(s['tasks']) >= self.policy['max_tasks']: raise PipelineError('TASK_CAPACITY')
             ident = str(uuid.uuid4())
             s['tasks'][ident] = {'id': ident, 'thread_id': thread_id, 'model': chosen, 'prompt': prompt,
+                'common_policy_sha256': self.common_hash,
                 'prompt_sha256': digest(prompt), 'state': 'QUEUED' if queue else 'STORED', 'remote_turn': None,
                 'deadline': None, 'answer': None, 'answer_truncated': False, 'stop_sent': False,
                 'queue_seq': len(s['events']) if queue else None, 'pending_turn': None, 'pending_approval_turn': None}
