@@ -15,7 +15,11 @@ import subprocess
 import time
 import uuid
 
+from codex_pipeline import (TOOLS as PIPELINE_TOOLS, PipelineError,
+                            tool_definitions as pipeline_tools, validate_arguments as pipeline_arguments)
 from control_socket import request
+from local_principal import LocalPrincipal
+from notification_outbox import NotificationError
 from storage import STATES
 from verification import normalize_acceptance
 from workspaces import spec
@@ -107,7 +111,7 @@ def task_view(task):
     return result
 
 
-def tool_definitions(writes=False, local_llm=False, local_models=False, chat_mailbox=False):
+def tool_definitions(writes=False, local_llm=False, local_models=False, chat_mailbox=False, codex_pipeline=False):
     identifier = {'type': 'string', 'pattern': UUID_PATTERN, 'maxLength': 36}
     def tool(name, description, properties, required=(), read=True):
         return {'name': name, 'description': description,
@@ -167,13 +171,18 @@ def tool_definitions(writes=False, local_llm=False, local_models=False, chat_mai
                 'request_key': {'type': 'string', 'pattern': KEY_PATTERN, 'maxLength': 128}}, ['prompt', 'request_key'], False),
             tool('orchestrator_cancel_task', 'Request cancellation of one task. Does not roll back side effects.',
                  {'task_id': identifier}, ['task_id'], False)]
+    if codex_pipeline:
+        for definition in pipeline_tools():
+            definition['outputSchema'] = {'type': 'object', 'properties': {
+                'call_id': identifier, 'data': {'type': 'object'}},
+                'required': ['call_id', 'data'], 'additionalProperties': False}
+            result.append(definition)
     return result
 
 
 class Adapter:
-    def __init__(self, root, allow_writes=False, allow_local_llm=False, allow_local_models=False, allow_chat_mailbox=False, allow_mailbox_grants=False):
+    def __init__(self, root, allow_writes=False, allow_local_llm=False, allow_local_models=False, allow_chat_mailbox=False, allow_mailbox_grants=False, *, allow_codex_pipeline=False, pipeline=None, events_service=None, principal_provider=None, notification_runtime=None):
         self.root = runtime_path(root)
-        self.tools = tool_definitions(allow_writes, allow_local_llm, allow_local_models, allow_chat_mailbox)
         self.mailbox = Mailbox(self.root) if allow_chat_mailbox else None
         self.grant = None
         if allow_mailbox_grants:
@@ -196,6 +205,37 @@ class Adapter:
             if not base.is_absolute() or any(p.is_symlink() for p in [base, *base.parents]) or not base.is_dir() or base.stat().st_uid != os.getuid():
                 raise ValueError('Unsafe helper directory')
             self.helper_root = base
+        if pipeline is not None and not allow_codex_pipeline:
+            raise ValueError('Pipeline activation is explicit')
+        if allow_codex_pipeline and pipeline is None:
+            raise ValueError('Pipeline executor must be explicitly connected')
+        if notification_runtime is not None:
+            if events_service is not None or principal_provider is not None:
+                raise ValueError('Use either notification_runtime or direct Events dependencies')
+            options = getattr(notification_runtime, 'adapter_options', None)
+            if not callable(options):
+                raise ValueError('Invalid notification runtime')
+            injected = options()
+            if not isinstance(injected, dict) or set(injected) - {'events_service', 'principal_provider'}:
+                raise ValueError('Invalid notification runtime options')
+            events_service = injected.get('events_service')
+            principal_provider = injected.get('principal_provider')
+            runtime_root = getattr(notification_runtime, 'runtime_root', self.root)
+            if Path(runtime_root).absolute() != self.root:
+                raise ValueError('Notification runtime must use the MCP runtime')
+        if events_service is None and principal_provider is not None:
+            raise ValueError('MCP Events principal provider requires an Events service')
+        if principal_provider is not None and not callable(principal_provider):
+            raise ValueError('MCP Events principal provider must be callable')
+        self.events_service = events_service
+        self.notification_runtime = notification_runtime
+        self.events_enabled = (events_service is not None
+                               and getattr(events_service, 'enabled', True) is True)
+        # This provider is server-side and derives only the local process UID.
+        # It is not identity for callers forwarded through a tunnel.
+        self.principal_provider = principal_provider
+        self.pipeline = pipeline
+        self.tools = tool_definitions(allow_writes, allow_local_llm, allow_local_models, allow_chat_mailbox, allow_codex_pipeline)
         self.policy = None
         if allow_writes:
             path = self.root / 'mcp-task-policy.json'
@@ -240,7 +280,77 @@ class Adapter:
                            'time': time.time(), 'automatic_retry': False}, stream)
         except OSError: pass  # Existing uncertainty is preserved; nothing is deleted.
 
-    def call_tool(self, name, arguments, rpc_id):
+    def _require_owned_pipeline_resource(self, principal, resource_type, resource_id):
+        runtime = self.notification_runtime
+        if (not isinstance(principal, LocalPrincipal) or not self.events_enabled
+                or runtime is None or getattr(runtime, 'outbox', None) is None):
+            raise Invalid('Authenticated task ACL unavailable')
+        if resource_type == 'task':
+            owned = runtime.outbox.task_owned_by(resource_id, principal)
+        else:
+            owned = runtime.outbox.thread_owned_by(resource_id, principal)
+        if not owned:
+            # Do not reveal whether another principal's ID exists.
+            raise Invalid('Resource not available')
+
+    def _owner_scoped_thread_listing(self, principal, arguments):
+        runtime = self.notification_runtime
+        if (not isinstance(principal, LocalPrincipal) or not self.events_enabled
+                or runtime is None or getattr(runtime, 'outbox', None) is None):
+            raise Invalid('Authenticated task ACL unavailable')
+        records = []
+        cursor = None
+        for _page_number in range(4):
+            page_args = {'limit': 20}
+            if cursor is not None:
+                page_args['cursor'] = cursor
+            page = self.pipeline.dispatch('codex_threads_list', page_args)
+            if not isinstance(page, dict):
+                raise Invalid('Invalid pipeline listing')
+            for thread in page.get('threads', []):
+                if (isinstance(thread, dict) and runtime.outbox.thread_owned_by(
+                        thread.get('id'), principal)):
+                    records.append({'kind': 'thread', 'data': thread})
+            for task in page.get('tasks', []):
+                if (isinstance(task, dict) and runtime.outbox.task_owned_by(
+                        task.get('id'), principal)):
+                    records.append({'kind': 'task', 'data': task})
+            cursor = page.get('next_cursor')
+            if cursor is None:
+                break
+        else:
+            raise Invalid('Owner listing exceeds bounded page count')
+        snapshot = hashlib.sha256(json.dumps(records, sort_keys=True,
+            ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode('utf-8')).hexdigest()
+        offset = 0
+        supplied = arguments.get('cursor')
+        if supplied is not None:
+            match = re.fullmatch(r'([a-f0-9]{64}):([0-9]{1,6})', supplied)
+            if not match or match.group(1) != snapshot:
+                raise Invalid('Owner listing changed')
+            offset = int(match.group(2))
+            if offset > len(records):
+                raise Invalid('Invalid owner listing cursor')
+        limit = arguments.get('limit', 20)
+        page_records = records[offset:offset + limit]
+        next_offset = offset + len(page_records)
+        return {'threads': [item['data'] for item in page_records if item['kind'] == 'thread'],
+                'tasks': [item['data'] for item in page_records if item['kind'] == 'task'],
+                'total_records': len(records),
+                'next_cursor': f'{snapshot}:{next_offset}' if next_offset < len(records) else None}
+
+    def _owner_scoped_events(self, principal, arguments):
+        runtime = self.notification_runtime
+        if (not isinstance(principal, LocalPrincipal) or not self.events_enabled
+                or runtime is None or getattr(runtime, 'outbox', None) is None):
+            raise Invalid('Authenticated task ACL unavailable')
+        try:
+            return runtime.outbox.source_events_for_owner(
+                principal, after=arguments.get('after', 0), limit=arguments.get('limit', 20))
+        except NotificationError:
+            raise Invalid('Event history unavailable') from None
+
+    def call_tool(self, name, arguments, rpc_id, request_principal=None):
         if name not in {t['name'] for t in self.tools}: raise Invalid('Tool is not enabled')
         if name == 'orchestrator_status': fields(arguments, [])
         elif name in MAILBOX_TOOLS:
@@ -270,6 +380,9 @@ class Adapter:
                 raise Invalid('Invalid local prompt bound')
             tokens = arguments.get('max_tokens', 256)
             if type(tokens) is not int or not 1 <= tokens <= 1024: raise Invalid('Invalid local output bound')
+        elif name in PIPELINE_TOOLS:
+            try: pipeline_arguments(name, arguments)
+            except PipelineError as exc: raise Invalid(exc.code) from None
         elif name in ['orchestrator_get_task', 'orchestrator_cancel_task']:
             fields(arguments, ['task_id'], ['task_id'])
             if not uuid_value(arguments['task_id']): raise Invalid('Invalid task ID')
@@ -291,6 +404,86 @@ class Adapter:
         if self.audit.tell() > AUDIT_LIMIT - 4096: raise OSError('Audit capacity reached')
         self.record('begin', **facts)
         try:
+            if name in PIPELINE_TOOLS:
+                if isinstance(request_principal, LocalPrincipal):
+                    if name == 'codex_pipeline_tick':
+                        raise Invalid('Shared pipeline tick is unavailable to per-user callers')
+                    if name in ('codex_thread_start', 'codex_threads_list', 'codex_events',
+                                'codex_capabilities'):
+                        if (not self.events_enabled or self.notification_runtime is None
+                                or getattr(self.notification_runtime, 'outbox', None) is None):
+                            raise Invalid('Authenticated task ACL unavailable')
+                    elif name in ('codex_chat_store', 'codex_task_submit', 'codex_chat_steer',
+                                  'codex_thread_archive'):
+                        self._require_owned_pipeline_resource(
+                            request_principal, 'thread', arguments['thread_id'])
+                    elif name in ('codex_chat_queue', 'codex_task_get', 'codex_task_cancel'):
+                        self._require_owned_pipeline_resource(
+                            request_principal, 'task', arguments['task_id'])
+                    if name == 'codex_threads_list':
+                        data = self._owner_scoped_thread_listing(request_principal, arguments)
+                        self.record('end', outcome='returned', **facts)
+                        content = {'call_id': call_id, 'data': data}
+                        return {'content': [{'type': 'text', 'text': json.dumps(content)}],
+                                'structuredContent': content, 'isError': False}
+                    if name == 'codex_events':
+                        data = self._owner_scoped_events(request_principal, arguments)
+                        self.record('end', outcome='returned', **facts)
+                        content = {'call_id': call_id, 'data': data}
+                        return {'content': [{'type': 'text', 'text': json.dumps(content)}],
+                                'structuredContent': content, 'isError': False}
+                principal = None
+                if self.events_enabled:
+                    try:
+                        principal = request_principal
+                        if principal is None and self.principal_provider is not None:
+                            principal = self.principal_provider()
+                        if not isinstance(principal, LocalPrincipal):
+                            principal = None
+                    except Exception:
+                        principal = None
+                try:
+                    data = self.pipeline.dispatch(name, arguments)
+                    failed = (data.get('status') in ('UNKNOWN', 'FAILED', 'BLOCKED')
+                              or data.get('state') in ('UNKNOWN', 'BLOCKED'))
+                except PipelineError as exc:
+                    data, failed = exc.result(), True
+                if (isinstance(request_principal, LocalPrincipal) and not failed
+                        and self.events_enabled and isinstance(data, dict)):
+                    if name == 'codex_thread_start':
+                        thread_id = data.get('thread_id')
+                        if thread_id:
+                            try:
+                                self.events_service.bind_thread_owner(thread_id, request_principal)
+                                data['access_binding'] = 'BOUND'
+                            except Exception:
+                                data['access_binding'] = 'UNAVAILABLE'
+                    elif name in ('codex_task_submit', 'codex_chat_store'):
+                        task_id = data.get('task_id') or data.get('id')
+                        if task_id:
+                            try:
+                                self.events_service.bind_task_owner(task_id, request_principal)
+                                data['access_binding'] = 'BOUND'
+                            except Exception:
+                                # The operation may already have committed; never replay it here.
+                                data['access_binding'] = 'UNAVAILABLE'
+                if (name in ('codex_task_submit', 'codex_chat_store')
+                        and self.events_enabled and not failed
+                        and isinstance(data, dict)):
+                    task_id = data.get('task_id') or data.get('id')
+                    if task_id:
+                        if principal is None:
+                            data['notification_binding'] = 'UNAVAILABLE'
+                        else:
+                            try:
+                                self.events_service.bind_task_owner(task_id, principal)
+                                data['notification_binding'] = 'BOUND'
+                            except Exception:
+                                data['notification_binding'] = 'UNAVAILABLE'
+                self.record('end', outcome='error_or_uncertain' if failed else 'returned', **facts)
+                content = {'call_id': call_id, 'data': data}
+                return {'content': [{'type': 'text', 'text': json.dumps(content)}],
+                        'structuredContent': content, 'isError': failed}
             if name in MAILBOX_TOOLS:
                 try:
                     backend=(self.grant if self.grant is not None and arguments['task_id']==self.grant.policy.task_id else self.mailbox)
@@ -358,6 +551,12 @@ class Adapter:
             self.record('end', outcome='returned', **facts)
             content = {'call_id': call_id, 'data': data}
             return {'content': [{'type': 'text', 'text': json.dumps(content)}], 'structuredContent': content, 'isError': False}
+        except Invalid:
+            self.record('end', outcome='denied', **facts)
+            body = {'call_id': call_id, 'code': 'NOT_AUTHORIZED', 'retry_same_request_key': False}
+            content = {'call_id': call_id, 'data': body}
+            return {'content': [{'type': 'text', 'text': json.dumps(content)}],
+                    'structuredContent': content, 'isError': True}
         except (OSError, EOFError, ValueError, RuntimeError, TypeError, KeyError, subprocess.SubprocessError):
             if name.startswith('aceis_local_') and name != 'aceis_local_model_status': self.mark_local_uncertain(call_id)
             self.record('end', outcome='error_or_uncertain', **facts)
@@ -366,14 +565,16 @@ class Adapter:
                     'retry_same_request_key': name == 'orchestrator_submit_task'}
             return {'content': [{'type': 'text', 'text': json.dumps(body)}], 'isError': True}
 
-    def handle(self, message):
+    def handle(self, message, *, principal=None):
         # Discovery failures need evidence too. Never record params, client metadata,
         # raw IDs or unknown method strings; tool calls retain their existing audit.
         method = message.get('method') if isinstance(message, dict) else None
-        observed = isinstance(message, dict) and 'id' in message and method in ('initialize', 'server/discover', 'tools/list')
+        observed = isinstance(message, dict) and 'id' in message and method in (
+            'initialize', 'server/discover', 'tools/list',
+            'events/list', 'events/subscribe', 'events/unsubscribe')
         try:
             if observed: self.record('protocol_request', method=method)
-            reply = self._handle(message)
+            reply = self._handle(message, principal)
             if observed:
                 code = reply.get('error', {}).get('code') if reply else None
                 self.record('protocol_response', method=method, error_code=code)
@@ -383,7 +584,7 @@ class Adapter:
             if not (type(identifier) is int or isinstance(identifier, str) and len(identifier) <= 128): identifier = None
             return self.error(identifier, -32603, 'Local adapter audit unavailable')
 
-    def _handle(self, message):
+    def _handle(self, message, request_principal=None):
         identifier = message.get('id') if isinstance(message, dict) else None
         if (not isinstance(message, dict) or message.get('jsonrpc') != '2.0'
                 or not isinstance(message.get('method'), str)
@@ -427,12 +628,16 @@ class Adapter:
                 if not isinstance(info, dict) or any(not isinstance(info.get(k), str) or len(info[k]) > 128 for k in ['name', 'version']):
                     raise Invalid('Invalid clientInfo')
                 self.initialized = True
-                result = {'protocolVersion': PROTOCOL, 'capabilities': {'tools': {'listChanged': False}},
+                capabilities = {'tools': {'listChanged': False}}
+                if self.events_enabled: capabilities['events'] = {}
+                result = {'protocolVersion': PROTOCOL, 'capabilities': capabilities,
                           'serverInfo': dict(SERVER_INFO)}
             elif method == 'server/discover':
                 fields(params, ['_meta'])
+                capabilities = {'tools': {'listChanged': False}}
+                if self.events_enabled: capabilities['events'] = {}
                 result = {'supportedVersions': [REQUEST_PROTOCOL, PROTOCOL],
-                          'capabilities': {'tools': {'listChanged': False}}, 'ttlMs': 0, 'cacheScope': 'private'}
+                          'capabilities': capabilities, 'ttlMs': 0, 'cacheScope': 'private'}
             elif method == 'ping': result = {}
             elif not modern and not self.ready: raise Invalid('Initialization must complete first')
             elif method == 'tools/list':
@@ -443,7 +648,43 @@ class Adapter:
                 if modern: result.update(ttlMs=0, cacheScope='private')
             elif method == 'tools/call':
                 fields(params, ['name', 'arguments', '_meta'], ['name'])
-                result = self.call_tool(params['name'], params.get('arguments', {}), identifier)
+                result = self.call_tool(params['name'], params.get('arguments', {}), identifier,
+                                        request_principal=request_principal)
+            elif method in ('events/list', 'events/subscribe', 'events/unsubscribe'):
+                if not self.events_enabled:
+                    return self.error(identifier, -32601, 'Method not found')
+                try:
+                    principal = request_principal
+                    if principal is None and self.principal_provider is not None:
+                        principal = self.principal_provider()
+                    if not isinstance(principal, LocalPrincipal):
+                        raise NotificationError('AUTHENTICATED_PRINCIPAL_REQUIRED')
+                    event_params = {key: value for key, value in params.items() if key != '_meta'}
+                    result = self.events_service.handle(method, event_params, principal)
+                except NotificationError as exc:
+                    if exc.code.startswith(('CALLBACK_', 'VERIFICATION_')):
+                        if ('TIMEOUT' in exc.code or 'DNS_FAILED' in exc.code
+                                or 'VERIFIER_UNAVAILABLE' in exc.code or 'BOUNDED_RESOLVER_REQUIRED' in exc.code):
+                            reason = 'timeout'
+                        elif 'UNSAFE' in exc.code or 'INVALID_CALLBACK_URL' in exc.code:
+                            reason = 'unsafe_destination'
+                        else:
+                            reason = 'challenge_failed'
+                        return {'jsonrpc': '2.0', 'id': identifier, 'error': {
+                            'code': -32015, 'message': 'CallbackEndpointError',
+                            'data': {'reason': reason}}}
+                    if (exc.code.startswith(('INVALID_', 'CURSOR_'))
+                            or exc.code in {'UNSUPPORTED_EVENT', 'EVENT_CATALOG_CURSOR_UNSUPPORTED'}):
+                        return {'jsonrpc': '2.0', 'id': identifier, 'error': {
+                            'code': -32602, 'message': 'Invalid params',
+                            'data': {'code': exc.code}}}
+                    return {'jsonrpc': '2.0', 'id': identifier, 'error': {
+                        'code': -32000, 'message': 'MCP Events request failed',
+                        'data': {'code': exc.code}}}
+                except Exception:
+                    return {'jsonrpc': '2.0', 'id': identifier, 'error': {
+                        'code': -32000, 'message': 'MCP Events request failed',
+                        'data': {'code': 'EVENT_SERVICE_UNAVAILABLE'}}}
             else: return self.error(identifier, -32601, 'Method not found')
             if modern:
                 # Modern metadata belongs to this request only, never to the legacy
@@ -451,12 +692,6 @@ class Adapter:
                 result = {**result, 'resultType': 'complete', '_meta': {SERVER_META: dict(SERVER_INFO)}}
             return {'jsonrpc': '2.0', 'id': identifier, 'result': result}
         except (Invalid, TypeError):
-            if isinstance(message,dict) and message.get('method') == 'tools/call':
-                params = message.get('params',{}) if isinstance(message,dict) else {}
-                name = params.get('name') if isinstance(params,dict) else None
-                enabled={t['name'] for t in self.tools}
-                self.record('tool_rejected',tool=name if isinstance(name,str) and name in enabled else 'unknown_or_disabled',
-                            error_code=-32602,rpc_id_hash=hashlib.sha256(json.dumps(identifier).encode()).hexdigest())
             if isinstance(message, dict) and 'id' not in message: return None
             valid_id = identifier if type(identifier) is int or isinstance(identifier, str) and len(identifier) <= 128 else None
             return self.error(valid_id, -32602, 'Invalid request parameters')
@@ -516,8 +751,12 @@ def serve(adapter):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Local MCP stdio adapter; read-only tools by default')
+    parser = argparse.ArgumentParser(description='Local MCP adapter; stdio by default')
     parser.add_argument('--runtime', type=Path, required=True, help='Operator-fixed existing private runtime')
+    parser.add_argument('--transport', choices=('stdio', 'http'), default='stdio',
+                        help='Use stdio or the explicit loopback-only Streamable HTTP server')
+    parser.add_argument('--http-port', type=int, default=8765,
+                        help='Loopback HTTP port; used only with --transport http')
     parser.add_argument('--allow-writes', action='store_true', help='Local tests only; requires runtime/mcp-task-policy.json')
     parser.add_argument('--allow-local-llm', action='store_true',
                         help='Separately approved bounded localhost inference; does not enable submit/cancel')
@@ -525,11 +764,50 @@ def main():
                         help='Approved fixed-profile HTTP selection/lifecycle; never Docker or commands')
     parser.add_argument('--allow-chat-mailbox', action='store_true',
                         help='Separately approved fixed-slot non-secret mailbox; default off')
-    parser.add_argument('--allow-mailbox-grants',action='store_true',
+    parser.add_argument('--allow-mailbox-grants', action='store_true',
                         help='Explicit finite workstream grant; requires mailbox and private grant policy, default off')
+    parser.add_argument('--allow-codex-pipeline', action='store_true',
+                        help='Opt-in app-server executor; requires the existing daemon pipeline flag too')
+    parser.add_argument('--allow-single-user-local-http', action='store_true',
+                        help='Enable loopback HTTP for the sole local OS user; does not enable workspace sharing')
     args = parser.parse_args()
     os.umask(0o077)
-    try: return serve(Adapter(args.runtime, args.allow_writes, args.allow_local_llm, args.allow_local_models, args.allow_chat_mailbox, args.allow_mailbox_grants))
+    pipeline = None
+    notification_runtime = None
+    try:
+        if args.transport == 'http' and not args.allow_codex_pipeline:
+            raise ValueError('HTTP mode requires the Codex task pipeline')
+        if args.transport == 'http' and not args.allow_single_user_local_http:
+            raise ValueError('HTTP mode requires the explicit single-user local policy')
+        if args.transport == 'stdio' and args.allow_single_user_local_http:
+            raise ValueError('Single-user local HTTP policy applies only to HTTP mode')
+        if args.transport == 'http' and (args.allow_writes or args.allow_local_llm
+                or args.allow_local_models or args.allow_chat_mailbox or args.allow_mailbox_grants):
+            raise ValueError('HTTP mode does not expose legacy or local helper tools')
+        if args.allow_codex_pipeline:
+            from notification_runtime import build_systemd_notification_runtime
+            notification_runtime = build_systemd_notification_runtime(
+                args.runtime,
+                events_transport=(args.transport == 'http'),
+                allow_single_user_local=(args.transport == 'http'))
+            if args.transport == 'http' and not notification_runtime.enabled:
+                raise ValueError('Single-user local notification runtime is unavailable')
+            from codex_host import DaemonPipelineProxy
+            pipeline = DaemonPipelineProxy(runtime_path(args.runtime))
+        adapter = Adapter(
+            args.runtime, args.allow_writes, args.allow_local_llm, args.allow_local_models,
+            args.allow_chat_mailbox, args.allow_mailbox_grants,
+            allow_codex_pipeline=args.allow_codex_pipeline, pipeline=pipeline,
+            notification_runtime=notification_runtime)
+        if args.transport == 'http':
+            # The legacy daemon task APIs have no per-HTTP-principal ACL.
+            # Expose only owner-bound Codex tools on this transport.
+            adapter.tools = [tool for tool in adapter.tools
+                             if tool.get('name', '').startswith('codex_')]
+            from mcp_http_transport import serve_http
+            return serve_http(adapter, port=args.http_port,
+                              allow_single_user_local=True)
+        return serve(adapter)
     except (OSError, ValueError, TypeError, sqlite3.Error):
         print('Adapter startup refused: verify private runtime and operator policy.', file=sys.stderr)
         return 1

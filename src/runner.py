@@ -102,7 +102,14 @@ class Runner:
             return {"workspace_id": task["workspace_id"], "state": "RELEASED", "files_retained": True}
 
     def lock(self):
-        return runtime_lock(self.root)
+        held = runtime_lock(self.root)
+        try:
+            from codex_host import pipeline_held
+            if pipeline_held(self.root): raise RuntimeError('Pipeline execution or cleanup remains unresolved')
+            return held
+        except BaseException:
+            held.close()
+            raise
 
     def run(self, task_id, timeout=120, *, dispatch_token=None):
         if not math.isfinite(timeout) or timeout <= 0:
@@ -474,6 +481,7 @@ def main():
     parser.add_argument("--development-poc", action="store_true", help="Explicit disposable bwrap PoC mode")
     parser.add_argument("--runtime", type=Path, default=PROJECT / ".runtime")
     parser.add_argument("--codex", help="Absolute Codex binary path; default resolves PATH")
+    parser.add_argument('--allow-codex-pipeline', action='store_true', help='Opt-in daemon-owned bounded native gateway')
     parser.add_argument("--via-daemon", action="store_true", help="Use the private daemon control socket")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("check")
@@ -542,7 +550,8 @@ def main():
     try:
         if args.command == "daemon":
             from daemon import foreground
-            return foreground(root, args.codex, development=args.development_poc)
+            return foreground(root, args.codex, development=args.development_poc,
+                              allow_codex_pipeline=args.allow_codex_pipeline)
         if args.via_daemon or args.command in ["status", "list", "pause", "resume_scheduler", "shutdown"]:
             from control_socket import request
             method, params = args.command, {}

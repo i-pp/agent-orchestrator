@@ -32,3 +32,7 @@ The [runner how-to](docs/how-to/run-task.md) demonstrates a read-only flow: chec
 ## Documentation
 
 See [verification design](docs/verification-design.md), [Git tracking](docs/git-tracking.md), [testing](docs/testing.md), and the [phase report index](docs/phase-reports.md). Shared orchestration policies are maintained in [`i-pp/ai-orchestration`](https://github.com/i-pp/ai-orchestration). The [Japanese README](README_jp.md) is the translation of this canonical English page.
+
+## Optional MCP Events integration
+
+An opt-in Codex pipeline can expose loopback-only Streamable HTTP and MCP Events for one local OS user, with a durable notification outbox. The default local stdio adapter and its existing opt-in model and mailbox tools remain available. HTTP mode requires explicit pipeline and single-user-local flags; it exposes only owner-scoped Codex tools. Keep the ChatGPT Dev app private and unpublished. See [MCP Events deployment](docs/mcp-events-deployment.md) and [runtime safety](docs/mcp-events-runtime-safety.md). Live callback delivery, ChatGPT conversation resumption, and the three-minute notification target have not been verified in a deployed environment.

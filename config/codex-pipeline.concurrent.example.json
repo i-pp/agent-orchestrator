@@ -1,0 +1,13 @@
+{
+  "schema": 2,
+  "workspaces": {
+    "development": "<PROJECT_ROOT>"
+  },
+  "models": [
+    "<KEEP_EXISTING_MODEL_ALLOWLIST>"
+  ],
+  "max_threads": 1,
+  "max_tasks": 1,
+  "concurrency": 1,
+  "timeout_seconds": 120
+}
