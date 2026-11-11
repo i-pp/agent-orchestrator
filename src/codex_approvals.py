@@ -49,6 +49,9 @@ def preview(value):
 def accept_reviewable(message):
     p = message.get('params', {})
     if not isinstance(p, dict) or message.get('method') != COMMAND: return False
+    choices = p.get('availableDecisions', ['accept', 'decline'])
+    if not isinstance(choices, list) or 'accept' not in choices:
+        return False
     command, cwd = p.get('command'), p.get('cwd')
     environment = p.get('environmentId')
     if environment is not None and (not isinstance(environment, str) or not environment
@@ -88,6 +91,8 @@ def projection(message, *, task_id, thread_id, received_at):
     if method == 'mcpServer/elicitation/request':
         target['server_name'] = preview(p.get('serverName'))
         target['message'] = preview(p.get('message'))
+    choices = p.get('availableDecisions', ['accept', 'decline'])
+    offered = [d for d in ('accept', 'decline') if isinstance(choices, list) and d in choices]
     return {'id': str(uuid.uuid4()), 'task_id': task_id, 'thread_id': thread_id,
             'native_thread_id': p['threadId'], 'native_turn_id': p['turnId'],
             'item_id': preview(p.get('itemId')), 'callback_id': preview(p.get('approvalId')),
@@ -98,7 +103,9 @@ def projection(message, *, task_id, thread_id, received_at):
             'risk': 'CRITICAL' if method == PERMISSIONS else 'HUMAN_REVIEW_REQUIRED',
             'risk_basis': 'Conservative classification; arbitrary commands are not proven safe.',
             'human_final_approval_required': True, 'content_untrusted': True,
-            'response_supported': method in RESPONDABLE_METHODS, 'accept_supported': accept_reviewable(message),
+            'offered_decisions': offered,
+            'response_supported': method in RESPONDABLE_METHODS and bool(offered),
+            'accept_supported': accept_reviewable(message),
             'status': 'PENDING', 'received_at': received_at}
 
 

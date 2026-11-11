@@ -4,12 +4,16 @@ on:
   pull_request:
     paths:
       - "src/codex_*.py"
+      - "src/approval_portal.py"
       - "src/mcp_adapter.py"
+      - "src/mcp_http_transport.py"
       - "src/pipeline_policy_migration.py"
       - "tests/test_codex_approval_bridge.py"
+      - "tests/test_approval_portal.py"
       - "tests/test_codex_schema_compatibility.py"
       - "tests/fixtures/codex-0.167-contract.json"
       - "docs/approval-bridge.md"
+      - "docs/approval-portal-mvp.md"
       - ".github/workflows/codex-approvals-ci.yml"
 
 permissions:
@@ -27,11 +31,11 @@ jobs:
           PYTHONPATH: tests
         run: >-
           python3 -B -m unittest
-          test_codex_approval_bridge test_codex_schema_compatibility
+          test_codex_approval_bridge test_approval_portal test_codex_schema_compatibility
           test_pipeline_foundation_isolated test_codex_pipeline_adapter_extract
           test_mcp_http_transport -v
       - name: Check Python syntax
         run: >-
           python3 -m py_compile src/codex_approvals.py src/codex_pipeline.py
           src/codex_app_protocol.py src/codex_host.py src/mcp_adapter.py
-          src/pipeline_policy_migration.py
+          src/pipeline_policy_migration.py src/approval_portal.py src/mcp_http_transport.py
