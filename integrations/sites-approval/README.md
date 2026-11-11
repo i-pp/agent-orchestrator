@@ -60,3 +60,9 @@ The production D1 API and Sites header injection remain unverified. Offline SQLi
 The current focused Python selection contains 136 tests, including 21 new cross-language/provider checks. The Worker core has 21 separate Node tests against the real SQL statements. The expiry regression covers slow request bodies, queued database mutations and a consume response delayed until after expiry. SQL checks database `unixepoch()` at the actual transition; post-commit expiry suppresses receipt return while retaining the consumed fence. The Python gate independently refuses an expired response without reopening that fence.
 
 The new CI definition runs both commands with Node 24 and read-only repository permissions. It has not run remotely for this unpushed candidate. Passing these checks does not establish a production authenticator, a successful hosted D1 migration or a live approval flow.
+
+## Native browser form regression
+
+A real browser check found that `Referrer-Policy: no-referrer` makes an ordinary form POST send `Origin: null`, even with the correct form MIME type, three fields and 64-character CSRF/hash values. The earlier manually constructed HTTP fixtures did not exercise this browser behavior. The approval page now uses `same-origin`, which preserves its normal same-origin POST while sending no Referer to third-party origins. Exact/null/cross-origin checks, cookie binding and CSRF remain strict.
+
+To reproduce the browser difference with fixed synthetic values only, run `node tests/fixtures/form_origin_probe.mjs`, open `http://127.0.0.1:5418/` in an isolated browser profile and submit the form. The reported Origin is null. Open `/same-origin` and submit again: Origin matches the local origin. This is a loopback-only header-behavior check, not production authentication. Stop the owned fixture server afterward.

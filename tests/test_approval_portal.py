@@ -112,6 +112,7 @@ class ApprovalPortalTests(unittest.TestCase):
     def test_csrf_origin_hash_and_extra_fields_are_rejected(self):
         i, _, token = self.form()
         invalid = [dict(token='wrong'), dict(headers={**self.headers, 'Origin': 'https://other.test'}),
+                   dict(headers={**self.headers, 'Origin': 'null'}),
                    dict(request_sha256='b'*64), dict(human_approved='true')]
         for args in invalid:
             with self.subTest(args=args), self.assertRaises(PortalError):
@@ -316,7 +317,7 @@ class ApprovalPortalTests(unittest.TestCase):
         status, response_headers, page = self.portal.handle('GET', path, headers)
         self.assertEqual(status, 200)
         self.assertEqual(response_headers['Cache-Control'], 'no-store')
-        self.assertEqual(response_headers['Referrer-Policy'], 'no-referrer')
+        self.assertEqual(response_headers['Referrer-Policy'], 'same-origin')
         self.assertIn("frame-ancestors 'none'", response_headers['Content-Security-Policy'])
         self.assertIn(b'Approve once', page)
         self.assertEqual(self.portal.handle('GET', path, {'Host': 'approval.example.test'})[0], 401)

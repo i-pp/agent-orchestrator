@@ -298,7 +298,7 @@ class ApprovalPortal:
     def handle(self, method, path, headers, body=b''):
         """Pure HTTP boundary for an approved host; never binds a socket."""
         response_headers = {
-            'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',
+            'Cache-Control': 'no-store', 'Referrer-Policy': 'same-origin',
             'X-Content-Type-Options': 'nosniff',
             'Content-Security-Policy': "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"}
         try:

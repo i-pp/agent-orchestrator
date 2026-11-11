@@ -49,6 +49,7 @@ test('owner form escapes data and supplies secure cookie without raw identity',a
   assert.equal(form.response.status,200);assert.ok(form.html.includes('&lt;script&gt;'));assert.ok(!form.html.includes('<script>'));assert.ok(!form.html.includes(OWNER));
   const cookie=form.response.headers.get('set-cookie');for(const token of ['Secure','HttpOnly','SameSite=Strict','Path=/'])assert.ok(cookie.includes(token));
   assert.ok(form.response.headers.get('content-security-policy').includes("form-action 'self'"));
+  assert.equal(form.response.headers.get('referrer-policy'),'same-origin');
 });
 test('machine credential cannot submit a browser decision, even with fixture identity',async()=>{
   const f=await fixture();await f.stage();const form=await f.form();assert.equal((await f.decide(form,{headers:{authorization:'Bearer '+KEY}})).status,403);
@@ -62,7 +63,7 @@ test('exact explicit click records only; machine status exposes no receipt',asyn
 });
 test('CSRF, session, origin, duplicates, choice and hash cannot be substituted',async()=>{
   const f=await fixture();await f.stage();const form=await f.form();
-  for(const options of [{csrf:'b'.repeat(64)},{cookie:'__Host-laf-browser='+'c'.repeat(64)},{origin:'https://evil.example.test'},{extraFields:{human_approved:'true'}},{decision:'acceptForSession'},{extraFields:{request_sha256:'d'.repeat(64)}}])assert.notEqual((await f.decide(form,options)).status,200);
+  for(const options of [{csrf:'b'.repeat(64)},{cookie:'__Host-laf-browser='+'c'.repeat(64)},{origin:'https://evil.example.test'},{origin:'null'},{extraFields:{human_approved:'true'}},{decision:'acceptForSession'},{extraFields:{request_sha256:'d'.repeat(64)}}])assert.notEqual((await f.decide(form,options)).status,200);
   assert.equal((await f.decide(form)).status,200);assert.notEqual((await f.decide(form)).status,200);
 });
 test('decline-only native request never offers or records accept',async()=>{

@@ -73,7 +73,7 @@ export class D1ApprovalStore {
 
 export function createApprovalService({store,origin,ownerBinding,approverSubjectSha256,machineKeySha256,authenticateBrowser,clock=()=>Math.floor(Date.now()/1000)} = {}) {
   const enabled=store && safeOrigin(origin) && /^[a-zA-Z0-9_-]{16,128}$/.test(ownerBinding??'') && HEX.test(approverSubjectSha256??'') && HEX.test(machineKeySha256??'') && typeof authenticateBrowser==='function';
-  const baseHeaders={'Cache-Control':'private, no-store','Referrer-Policy':'no-referrer','X-Content-Type-Options':'nosniff','Content-Security-Policy':"default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"};
+  const baseHeaders={'Cache-Control':'private, no-store','Referrer-Policy':'same-origin','X-Content-Type-Options':'nosniff','Content-Security-Policy':"default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"};
   function json(value,status=200) { return new Response(JSON.stringify(value),{status,headers:{...baseHeaders,'Content-Type':'application/json'}}); }
   const envelope=row=>Object.fromEntries(['challenge_id','approval_id','owner_binding','binding_sha256','request_sha256','expires_at'].map(k=>[k,row[k]]));
   function state(row,now) {
