@@ -28,9 +28,13 @@ The MCP HTTP fixture tests exercise this error-and-retry flow and two legacy ses
 
 A production deployment can use a real OIDC identity provider plus an explicit per-request confirmation, with stronger reauthentication where the action requires it. Browser WebAuthn/passkeys are another option and do not depend on the Linux server implementing Codex's native biometric API. Neither option is implemented by returning a model-supplied `human_approved` flag.
 
+An optional managed Sites host is another possible provider. Its platform contract supplies a stable per-Site server-side user ID and a separate identity-less service-access path. It is not implemented or authenticated by this candidate. Workspace-private Sites can also be visited by workspace admins; a sole explicit viewer is not a guarantee that no admin can view the content. Personal-account private Sites are documented, but availability in the intended personal account has not been checked. Sites hosting has a future usage-based pricing model, so this must remain an optional provider rather than a required LAF dependency. See [approval host options](approval-host-options.md) for the verified boundaries, minimal configuration and synthetic-first check plan.
+
 Before a live check, choose and approve the reachable HTTPS origin, actual authenticator and stable-account-to-local-owner mapping. Login sessions need the provider's normal issuer/audience/nonce/state/PKCE checks, secure cookie handling and expiry. Identity-only login is not action approval; the explicit one-shot POST remains separate. Do not reuse another plugin's OAuth grant or change an existing application's scopes silently.
 
 The original task deadline continues to apply while a human reviews the action. The host must reconcile a timed-out or canceled task rather than re-create its approval. A live check requires separate authorization for any new credentials, account mapping, listener/tunnel configuration or service rollout. No such change is part of this candidate.
+
+There is no production authentication-provider implementation in this PR. The real Chat URL interaction, a real authenticated browser decision, hosted access enforcement, and a live Codex request resuming the same task remain unverified. The connected runtime remains unchanged and must not be described as remotely approvable on the basis of these fixture tests.
 
 ## Offline verification
 
