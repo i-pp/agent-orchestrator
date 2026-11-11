@@ -1,4 +1,4 @@
-"""Offline-first boundary for codex-cli 0.165.0 app-server JSON messages.
+"""Offline-first boundary for the inspected Codex app-server JSON subset.
 
 No socket, authentication or default transport is provided. StdioTransport is
 opt-in and starts only when start() is explicitly called. The host owns
@@ -16,6 +16,8 @@ import re
 import selectors
 import subprocess
 import time
+
+from codex_approvals import fingerprint as approval_fingerprint, request_key as approval_key, RESPONDABLE_METHODS, accept_reviewable
 from collections.abc import Callable
 
 
@@ -23,7 +25,10 @@ SCHEMA_VERSION = "codex-cli 0.165.0"
 # Installed service binary was also inspected with generate-json-schema only.
 # Across 26 relevant schemas, differences are confined to CodexErrorInfo
 # variants, which this boundary does not interpret or export.
-COMPATIBLE_SCHEMA_VERSIONS = ('0.165.0', '0.164.0-alpha.11.1')
+# The 0.167.0 addition is backed by the generated stable-subset contract in
+# tests/fixtures/codex-0.167-contract.json and read-only initialization/catalogue
+# probes. It does not enable experimental verification or prove a model turn.
+COMPATIBLE_SCHEMA_VERSIONS = ('0.167.0', '0.165.0', '0.164.0-alpha.11.1')
 
 
 def schema_version_supported(user_agent):
@@ -302,6 +307,8 @@ class ProtocolClient:
         self.initialized = False
         self._init_attempted = False
         self._sequence = 0
+        self._pending_approvals = {}
+        self._consumed_approvals = set()
         self._busy = False
         self._diag = {'last_method': None, 'stage': 'constructed', 'failure_code': None,
                       'initialize_acknowledged': False, 'initialized_notification_written': False}
@@ -399,17 +406,82 @@ class ProtocolClient:
         """Return one raw model/list page; no implicit pagination or model probe."""
         return self.request("model/list", params)
 
+    def respond_approval(self, request_id, method, request_sha256, decision):
+        """Write one correlated decision on this exact connection, never replay.
+
+        The host must independently verify a human decision before calling this.
+        Session-wide decisions, policy amendments and permission grants are absent.
+        """
+        if not self.initialized or self._busy:
+            raise ProtocolError('idle initialized connection required')
+        key = approval_key(request_id)
+        pending = self._pending_approvals.get(key)
+        if (key is None or pending is None or pending[:2] != (method, request_sha256)
+                or decision not in pending[2]
+                or method not in RESPONDABLE_METHODS or decision not in ('accept', 'decline')):
+            raise ProtocolError('approval is not pending on this connection')
+        writer = getattr(self.exchange, 'write_response', None)
+        if not callable(writer): raise ProtocolError('response transport unavailable')
+        # Consume before IO, including failures: loss of the ACK cannot cause a
+        # second grant, even under a different caller idempotency key.
+        del self._pending_approvals[key]
+        self._consumed_approvals.add(key)
+        self._busy = True
+        try:
+            writer({'id': request_id, 'result': {'decision': decision}}, self.timeout_s)
+        except Exception as exc:
+            raise ProtocolUnknown('approval response outcome unknown; never resend') from exc
+        finally:
+            self._busy = False
+
     def receive(self, message):
         """Forward server messages without answering, granting or replaying them.
 
         Unknown methods are delivered with known=False for host diagnostics.
-        No response-writing or approval-resolution capability is exposed here.
+        Supported pending requests may only be answered explicitly by the host
+        after its independent human gate; receive itself never approves.
         """
         message = _json_copy(message, self.max_response_bytes)
         self._diag['last_server_message_shape'] = frame_shape(message)
         message = _server_message(message)
         request = "id" in message
         method = message["method"]
+        if request and method in RESPONDABLE_METHODS:
+            key = approval_key(message['id'])
+            if key is not None and key not in self._consumed_approvals:
+                if len(self._consumed_approvals) >= 128:
+                    raise ProtocolError('approval connection lifetime capacity reached')
+                params = message.get('params', {})
+                if not isinstance(params, dict): raise ProtocolError('invalid approval params')
+                choices = params.get('availableDecisions', ['accept', 'decline'])
+                allowed = tuple(d for d in ('accept', 'decline') if isinstance(choices, list) and d in choices)
+                # grantRoot asks for broader session writes, not a one-shot edit.
+                if not accept_reviewable(message):
+                    allowed = tuple(d for d in allowed if d != 'accept')
+                value = (method, approval_fingerprint(message), allowed, params.get('threadId'), params.get('turnId'))
+                if key in self._pending_approvals and self._pending_approvals[key] != value:
+                    self._pending_approvals.pop(key, None)
+                    raise ProtocolError('approval request ID changed content')
+                if len(self._pending_approvals) >= 128 and key not in self._pending_approvals:
+                    raise ProtocolError('pending approval capacity reached')
+                self._pending_approvals[key] = value
+        if not request and method in ('turn/completed', 'thread/archived', 'thread/closed'):
+            params = message.get('params', {})
+            if not isinstance(params, dict): raise ProtocolError('invalid terminal params')
+            turn = params.get('turn', {})
+            turn_id = turn.get('id') if isinstance(turn, dict) else None
+            for pending_id, pending in list(self._pending_approvals.items()):
+                if (pending[3] == params.get('threadId') and (method != 'turn/completed'
+                        or pending[4] == turn_id)):
+                    self._pending_approvals.pop(pending_id)
+                    self._consumed_approvals.add(pending_id)
+        if not request and method == 'serverRequest/resolved':
+            params = message.get('params', {})
+            if not isinstance(params, dict): raise ProtocolError('invalid resolution params')
+            resolved_key = approval_key(params.get('requestId'))
+            if resolved_key in self._pending_approvals:
+                self._pending_approvals.pop(resolved_key)
+                self._consumed_approvals.add(resolved_key)
         event = {"kind": "server_request" if request else "notification",
                  "known": method in (_SERVER_REQUESTS if request else _NOTIFICATIONS),
                  "approval_required": request and method in APPROVAL_METHODS,
@@ -665,6 +737,25 @@ class StdioTransport:
             if self._diag['failure_code'] is None: self._failure('EXCHANGE_' + self._diag['stage'].upper())
             self._broken = True
             raise ProtocolUnknown("stdio exchange failed; outcome unknown, no retry") from exc
+        finally:
+            self._active = False
+
+    def write_response(self, message, timeout_s):
+        """One-way JSON-RPC response. A successful write is not execution proof."""
+        self._ready()
+        if self._active: raise ProtocolError('stdio operation is active')
+        _object(message, {'id', 'result'}, {'id', 'result'})
+        if not _valid_id(message['id']) or message['result'] not in (
+                {'decision': 'accept'}, {'decision': 'decline'}):
+            raise ProtocolError('unsupported approval response')
+        if type(timeout_s) not in (int, float) or not math.isfinite(timeout_s) or timeout_s <= 0:
+            raise ProtocolError('positive timeout required')
+        self._active = True
+        try:
+            self._write(message, time.monotonic() + timeout_s)
+        except Exception as exc:
+            self._broken = True
+            raise ProtocolUnknown('response write outcome unknown; no retry') from exc
         finally:
             self._active = False
 

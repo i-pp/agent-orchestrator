@@ -417,7 +417,8 @@ class Adapter:
                                   'codex_thread_archive'):
                         self._require_owned_pipeline_resource(
                             request_principal, 'thread', arguments['thread_id'])
-                    elif name in ('codex_chat_queue', 'codex_task_get', 'codex_task_cancel'):
+                    elif name in ('codex_chat_queue', 'codex_task_get', 'codex_task_cancel',
+                                  'codex_approval_get', 'codex_approval_decide'):
                         self._require_owned_pipeline_resource(
                             request_principal, 'task', arguments['task_id'])
                     if name == 'codex_threads_list':

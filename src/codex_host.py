@@ -195,6 +195,11 @@ class _LazyClient:
     event_sink = None
     def __init__(self, gateway): self.gateway = gateway
     def request(self, method, params): return self.gateway.rpc(method, params)
+    def respond_approval(self, request_id, method, request_sha256, decision):
+        # Never connect/resume/recreate to deliver an old RPC response.
+        if self.gateway.protocol is None or self.gateway.failed:
+            raise PipelineError('APPROVAL_CONNECTION_UNAVAILABLE')
+        return self.gateway.protocol.respond_approval(request_id, method, request_sha256, decision)
 
 
 class HostGateway:
