@@ -12,7 +12,7 @@ The current Sites integration contract supplies `oai-authenticated-user-id`, whi
 
 Browser sign-in uses the platform's `/signin-with-chatgpt`, `/signout-with-chatgpt` and `/callback` integration. Do not create a second OAuth flow or reuse another plugin's credential. A successful login identifies the visitor, but never approves a pending action by itself. Preserve the exact-request, explicit POST and CSRF checks.
 
-For machine calls, Sites supports a Site-specific SIWC bypass token in `OAI-Sites-Authorization`. Dispatch consumes that token and supplies no signed-in visitor identity. It is not human approval evidence. The human decision endpoint must reject an identity-less request even if service access is valid. If additional machine authorization is used, Sites preserves the ordinary `Authorization` header for that purpose.
+For machine calls, Sites supports a Site-specific SIWC bypass token in `OAI-Sites-Authorization`. Dispatch validates the token and removes this header before forwarding; it supplies no signed-in visitor identity. The token is reusable until rotation, not a one-shot human receipt. The human decision endpoint must reject an identity-less request even if service access is valid. If additional machine authorization is used, Sites preserves the ordinary `Authorization` header for that purpose.
 
 The Site's request-staging and decision-reading API must be separate from its human decision POST. Do not expose the human decision as a Site MCP or browser-agent tool. Site MCP calls can carry authenticated user identity too, so an identity header alone is not evidence of a browser click.
 
