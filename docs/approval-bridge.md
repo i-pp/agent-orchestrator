@@ -11,7 +11,7 @@ The [authenticated portal MVP](approval-portal-mvp.md) adds an inert page core a
 - `codex_approval_decide(task_id, approval_id, request_sha256, decision, request_key)` accepts only one-shot `accept` or `decline`. Both require an independently configured trusted human decision gate. MCP arguments cannot enable the gate or assert `human_approved`.
 - The HTTP adapter checks the existing authenticated task-owner binding for both operations. The legacy single-user stdio boundary is unchanged. OS-user identity, a request ID/hash, a prompt, a mailbox answer, or model text does not prove a human decision.
 
-The gate is an internal dependency-injection seam, not a new authentication implementation. Its provider must verify an actual human action bound to the exact request, decision, target, and required platform gate, then return an opaque audit receipt. The candidate includes fixture gates only. No production gate, signing key, credential, permission, trust configuration, listener, tunnel, or service change is introduced.
+The gate is an internal dependency-injection seam, not a new authentication implementation. Its provider must verify an actual human action bound to the exact request, decision, target, and required platform gate, then return an opaque audit receipt. The default host still has no gate. An optional [Sites provider](../integrations/sites-approval/README.md) is now implemented separately and requires explicitly approved identity pairing, credentials and hosting. No production LAF service wiring, signing key, credential value, permission expansion or service change is introduced by this source change.
 
 ## Native protocol and human-only boundaries
 

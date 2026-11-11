@@ -8,7 +8,7 @@ For an initial managed-host check, use only synthetic requests in a new dedicate
 
 Sites supports private Sites in workspace and personal accounts. Workspace-private access includes the owner and workspace admins. The private-deployment tool requires a sole explicitly allowed viewer and no groups, but that check does not eliminate implicit admin access. A strict requirement that no other workspace admin can view approval details needs a separately verified personal account or a user-controlled host.
 
-The current Sites integration contract supplies `oai-authenticated-user-id`, which is stable within one Site and different across Sites. Server code must authorize the exact pinned ID; email and display name are not authorization keys. The public documentation separately confirms the hosted sign-in flow and server-side authorization requirement. The actual identity headers and access enforcement of a new approval Site have not yet been tested.
+The current Sites integration contract supplies `oai-authenticated-user-id`, which is stable within one Site and different across Sites. Server code must authorize the exact pinned ID; email and display name are not authorization keys. The public documentation separately confirms the hosted sign-in flow and server-side authorization requirement. An approved private pilot has now tested normal browser identity and removal of synthetic caller-supplied identity headers from official machine-access requests. Live tests with another real account or an implicit workspace admin remain unverified.
 
 Browser sign-in uses the platform's `/signin-with-chatgpt`, `/signout-with-chatgpt` and `/callback` integration. Do not create a second OAuth flow or reuse another plugin's credential. A successful login identifies the visitor, but never approves a pending action by itself. Preserve the exact-request, explicit POST and CSRF checks.
 
@@ -45,7 +45,7 @@ After the target account and dedicated private deployment are authorized:
 4. Use the isolated fixture MCP to check URL interaction or normal-link presentation, explicit approve/decline, one-shot receipt consumption and synthetic same-task resolution. Real Chat presentation remains a separate result from provider authentication.
 5. Seek separate approval before enabling the provider in a live LAF runtime or sending an actual task preview. Keep important native/platform confirmation steps intact and do not reopen old canceled tasks.
 
-No hosted step above has run. The existing candidate's 115 focused tests and 310 broader offline tests use fixture authentication and synthetic peers, not Sites or a production identity provider.
+The approved private pilot has now completed hosted identity pairing, narrow machine access, D1 staging and an authenticated browser accept consumed once over real HTTPS. Its native peer was synthetic, with zero real Codex requests or commands and no existing-service change. The earlier 115/310 fixture selections remain separate evidence; the current provider and inert native-plan checks are described in the [provider verification](../integrations/sites-approval/README.md).
 
 ## Privacy and cost choice
 
@@ -62,4 +62,4 @@ Preserve a self-hosted HTTPS/OIDC or WebAuthn provider as an alternative. It nee
 - [Sites hosting and pricing](https://learn.chatgpt.com/docs/sites#pricing).
 - [Authenticated approval candidate and offline verification](approval-portal-mvp.md).
 
-Public documentation and the current integration contract were checked on November 11, 2026. Actual access enforcement, the intended personal account's Sites availability, real Chat interaction and live Codex resumption remain unverified.
+Public documentation and the current integration contract were checked on November 11, 2026. The intended personal account's Sites availability, other-account/admin live behavior, real Chat URL-elicitation presentation and live Codex resumption remain unverified.

@@ -28,13 +28,13 @@ The MCP HTTP fixture tests exercise this error-and-retry flow and two legacy ses
 
 A production deployment can use a real OIDC identity provider plus an explicit per-request confirmation, with stronger reauthentication where the action requires it. Browser WebAuthn/passkeys are another option and do not depend on the Linux server implementing Codex's native biometric API. Neither option is implemented by returning a model-supplied `human_approved` flag.
 
-An optional managed Sites host is another possible provider. Its platform contract supplies a stable per-Site server-side user ID and a separate identity-less service-access path. It is not implemented or authenticated by this candidate. Workspace-private Sites can also be visited by workspace admins; a sole explicit viewer is not a guarantee that no admin can view the content. Personal-account private Sites are documented, but availability in the intended personal account has not been checked. Sites hosting has a future usage-based pricing model, so this must remain an optional provider rather than a required LAF dependency. See [approval host options](approval-host-options.md) for the verified boundaries, minimal configuration and synthetic-first check plan.
+An optional managed Sites host is another possible provider. Its platform contract supplies a stable per-Site server-side user ID and a separate identity-less service-access path. An optional implementation is now available in the [Sites provider](../integrations/sites-approval/README.md); it is not enabled in the default LAF host. Workspace-private Sites can also be visited by workspace admins; a sole explicit viewer is not a guarantee that no admin can view the content. Personal-account private Sites are documented, but availability in the intended personal account has not been checked. Sites hosting has a future usage-based pricing model, so this must remain an optional provider rather than a required LAF dependency. See [approval host options](approval-host-options.md) for the verified boundaries, minimal configuration and synthetic-first check plan.
 
 Before a live check, choose and approve the reachable HTTPS origin, actual authenticator and stable-account-to-local-owner mapping. Login sessions need the provider's normal issuer/audience/nonce/state/PKCE checks, secure cookie handling and expiry. Identity-only login is not action approval; the explicit one-shot POST remains separate. Do not reuse another plugin's OAuth grant or change an existing application's scopes silently.
 
 The original task deadline continues to apply while a human reviews the action. The host must reconcile a timed-out or canceled task rather than re-create its approval. A live check requires separate authorization for any new credentials, account mapping, listener/tunnel configuration or service rollout. No such change is part of this candidate.
 
-There is no production authentication-provider implementation in this PR. The real Chat URL interaction, a real authenticated browser decision, hosted access enforcement, and a live Codex request resuming the same task remain unverified. The connected runtime remains unchanged and must not be described as remotely approvable on the basis of these fixture tests.
+The default LAF host has no configured production authentication channel. A separately approved private Sites pilot has now verified an authenticated browser decision, machine-access separation, D1 one-shot consumption and real HTTPS handoff to a synthetic native peer. Real Chat URL-elicitation presentation and an actual Codex approval/resumption remain unverified. The connected runtime remains unchanged and must not be described as remotely approvable on the basis of this synthetic trial.
 
 ## Offline verification
 
@@ -46,6 +46,14 @@ PYTHONPATH=tests python3 -B -m unittest \
 ```
 
 The dedicated command passes 115 tests, including 33 new portal and interaction tests. These cover unauthenticated and wrong-owner access, caller authentication claims, CSRF, origin, session and hash mismatches, expiry, duplicate decisions and receipt consumption, unused-decision expiry and reauthentication, exact native decision choices, portal restart, canceled tasks, native-only permissions, withheld file acceptance, HTML escaping, MCP capability negotiation, the standard URL-required error/retry flow, session capability isolation, and same-task end-to-end fixtures. The broader existing offline selections plus the new tests pass 310 tests. These are fixture results, not a real-login or live-Chat approval result.
+
+## Hosted synthetic verification
+
+The dedicated private pilot recorded the user's explicit one-shot accept through normal Sites identity, consumed that decision once over real HTTPS, and answered the same synthetic native request exactly once. Its task stayed waiting until typed synthetic resolution and matching history, then became running. Replay was rejected. No real Codex request, command or existing service was used.
+
+An actual browser check also exposed a form bug: `no-referrer` made native form POSTs send `Origin: null`. The page now uses `same-origin`, preserving strict Origin/CSRF checks while sending no Referer to third parties. This behavior was compared in isolated Chromium and regression expectations were updated. The first expired attempts are not counted as success or evidence that the user never clicked.
+
+The [real-trial plan](real-codex-approval-trial.md) separates the next native test from this completed synthetic proof.
 
 ## Sources
 

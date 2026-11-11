@@ -1,6 +1,6 @@
 # Offline Sites approval provider
 
-This candidate connects a separately authenticated browser decision to LAF through a fixed-origin, machine-authenticated HTTPS API. It remains local and unconfigured. The existing synthetic Site is unchanged and cannot issue approval receipts.
+This candidate connects a separately authenticated browser decision to LAF through a fixed-origin, machine-authenticated HTTPS API. The default LAF host remains unconfigured. A separately approved private synthetic Site now runs this optional provider; that pilot does not activate the existing LAF service or connect a real Codex task.
 
 Run the offline checks with Python 3 and Node 24 or newer:
 
@@ -47,22 +47,30 @@ Unlike the storage-free connectivity pilot, this design needs D1 to retain reque
 
 Workspace administrators may still have platform-level visibility or management authority. Server pinning separates approval authority from viewing access; it is not isolation from a workspace administrator who controls the hosting environment. Choose a separately verified personal Site or self-hosted provider if that trust boundary is unsuitable.
 
-D1 also changes the future hosting cost: the documented proposed January 2027 storage base is 25 credits per Site-month before traffic and stored data, subject to plan allowance and contract. No storage binding, secret, billing commitment or production setting has been created here. See [host options](../../docs/approval-host-options.md) for the verified product limits and pricing source.
+D1 also changes the future hosting cost: the documented proposed January 2027 storage base is 25 credits per Site-month before traffic and stored data, subject to plan allowance and contract. The source and offline test commands provision none of these resources. Separately authorized pilot configuration is described below; it created no billing-plan change or live LAF setting. See [host options](../../docs/approval-host-options.md) for the verified product limits and pricing source.
 
 ## Rollout and recovery limits
 
 A real browser screenshot confirmed that the existing storage-free pilot can display authenticated connection success. It did not test this provider, stable owner pinning, credentialed machine access or native execution. Automated direct requests to that pilot met Cloudflare error 1010; that access restriction was not bypassed and is not a passing authentication test.
 
-The production D1 API and Sites header injection remain unverified. Offline SQLite is useful contract evidence, not proof that a Cloudflare deployment behaves identically. Owner/key changes must account for deployment propagation and any platform token-rotation grace period. Rollback must retain the new ledger reader and consume-fence state; never discard approval history or reset a consumed/unknown interaction to pending.
+The approved pilot verified its D1 stage/decision/consume path and Sites identity separation over real HTTPS. Offline SQLite alone would not establish that result; the hosted proof remains limited to the synthetic native peer and tested cases. Owner/key changes must account for deployment propagation and any platform token-rotation grace period. Rollback must retain the new ledger reader and consume-fence state; never discard approval history or reset a consumed/unknown interaction to pending.
 
 ## Current offline evidence
 
-The current focused Python selection contains 136 tests, including 21 new cross-language/provider checks. The Worker core has 21 separate Node tests against the real SQL statements. The expiry regression covers slow request bodies, queued database mutations and a consume response delayed until after expiry. SQL checks database `unixepoch()` at the actual transition; post-commit expiry suppresses receipt return while retaining the consumed fence. The Python gate independently refuses an expired response without reopening that fence.
+The current focused Python selection contains 143 tests, including 21 cross-language/provider checks and seven inert real-trial-plan checks. The Worker core has 21 separate Node tests against the real SQL statements. The expiry regression covers slow request bodies, queued database mutations and a consume response delayed until after expiry. SQL checks database `unixepoch()` at the actual transition; post-commit expiry suppresses receipt return while retaining the consumed fence. The Python gate independently refuses an expired response without reopening that fence.
 
-The new CI definition runs both commands with Node 24 and read-only repository permissions. It has not run remotely for this unpushed candidate. Passing these checks does not establish a production authenticator, a successful hosted D1 migration or a live approval flow.
+The CI definition runs the focused selection with Node 24 and read-only repository permissions. Remote results must be checked at the exact published head. Passing these checks does not establish a production authenticator, a successful hosted D1 migration or a live approval flow.
 
 ## Native browser form regression
 
 A real browser check found that `Referrer-Policy: no-referrer` makes an ordinary form POST send `Origin: null`, even with the correct form MIME type, three fields and 64-character CSRF/hash values. The earlier manually constructed HTTP fixtures did not exercise this browser behavior. The approval page now uses `same-origin`, which preserves its normal same-origin POST while sending no Referer to third-party origins. Exact/null/cross-origin checks, cookie binding and CSRF remain strict.
 
 To reproduce the browser difference with fixed synthetic values only, run `node tests/fixtures/form_origin_probe.mjs`, open `http://127.0.0.1:5418/` in an isolated browser profile and submit the form. The reported Origin is null. Open `/same-origin` and submit again: Origin matches the local origin. This is a loopback-only header-behavior check, not production authentication. Stop the owned fixture server afterward.
+
+## Completed hosted synthetic proof
+
+With explicit user authorization, a dedicated private Site received the user's per-Site fingerprint through a normal authenticated pairing page, configured the narrow machine channel and created its D1 schema. Official service access supplied no visitor identity; synthetic forged identity headers were stripped; missing app credentials and machine access to the human route were rejected. No raw identity or credential was placed in source.
+
+The user's actual browser accept was recorded and consumed once over real HTTPS. The same synthetic task received exactly one native response, stayed waiting before typed resolution/history, then became running. Replay was rejected. Real commands, real Codex requests and existing-service changes were all zero. The native peer in this proof was deliberately synthetic.
+
+This establishes the managed identity/HTTPS/provider boundary, not production Pipeline activation, real Codex execution, fresh step-up authentication or real Chat URL-elicitation behavior. [The next native-trial plan](../../docs/real-codex-approval-trial.md) remains preparation only.
