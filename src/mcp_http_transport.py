@@ -161,7 +161,7 @@ class McpHttpEndpoint:
             error['data'] = data
         return {'jsonrpc': '2.0', 'id': identifier, 'error': error}
 
-    def _new_session(self, principal=None):
+    def _new_session(self, principal=None, client_capabilities=None):
         import uuid
         now = self.clock()
         with self._session_lock:
@@ -171,7 +171,8 @@ class McpHttpEndpoint:
             session_id = str(uuid.uuid4())
             self._sessions[session_id] = {'created_at': now, 'last_seen': now, 'ready': False,
                                           'protocol_version': PROTOCOL,
-                                          'principal_id': principal_identity(principal)}
+                                          'principal_id': principal_identity(principal),
+                                          'client_capabilities': json.loads(json.dumps(client_capabilities or {}))}
         return session_id
 
     def _expire_sessions(self, now):
@@ -266,6 +267,7 @@ class McpHttpEndpoint:
         metadata = params.get('_meta')
         if not isinstance(metadata, dict):
             metadata = {}
+        client_capabilities = {}
         protocol_header = fields.get('mcp-protocol-version')
         rpc_method_header = fields.get('mcp-method')
         if protocol_header is None and request_method != 'initialize':
@@ -333,7 +335,7 @@ class McpHttpEndpoint:
                         or any(not isinstance(client_info.get(key), str) or len(client_info[key]) > 128
                                for key in ('name', 'version'))):
                     return self._reply(400, self._error(identifier, -32602, 'Invalid initialization request'))
-                session_id = self._new_session(principal)
+                session_id = self._new_session(principal, params['capabilities'])
                 if session_id is None:
                     return self._reply(503, self._error(identifier, -32000,
                                                         'MCP session capacity reached'))
@@ -359,6 +361,7 @@ class McpHttpEndpoint:
                 self.adapter.initialized = True
                 self.adapter.ready = True
                 return self._reply(202)
+            client_capabilities = session.get('client_capabilities', {})
             if not session['ready']:
                 return self._reply(400, self._error(identifier, -32002, 'Session is not initialized'))
             if 'id' not in message:
@@ -370,9 +373,15 @@ class McpHttpEndpoint:
             if protocol_header is None or not isinstance(metadata.get(CAPABILITIES_META), dict):
                 return self._reply(400, self._error(identifier, -32602,
                                                     'Missing client capabilities'))
+            client_capabilities = metadata[CAPABILITIES_META]
         try:
             with self._adapter_lock:
-                response = self.adapter.handle(message, principal=principal)
+                contextual = getattr(self.adapter, 'handle_with_client_capabilities', None)
+                if callable(contextual):
+                    response = contextual(message, principal=principal,
+                                          client_capabilities=client_capabilities)
+                else:
+                    response = self.adapter.handle(message, principal=principal)
         except Exception:
             response = self._error(identifier, -32603, 'MCP server unavailable')
         if not isinstance(response, dict):

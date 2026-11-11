@@ -417,7 +417,8 @@ class Adapter:
                                   'codex_thread_archive'):
                         self._require_owned_pipeline_resource(
                             request_principal, 'thread', arguments['thread_id'])
-                    elif name in ('codex_chat_queue', 'codex_task_get', 'codex_task_cancel'):
+                    elif name in ('codex_chat_queue', 'codex_task_get', 'codex_task_cancel',
+                                  'codex_approval_get', 'codex_approval_begin', 'codex_approval_decide'):
                         self._require_owned_pipeline_resource(
                             request_principal, 'task', arguments['task_id'])
                     if name == 'codex_threads_list':
@@ -565,7 +566,10 @@ class Adapter:
                     'retry_same_request_key': name == 'orchestrator_submit_task'}
             return {'content': [{'type': 'text', 'text': json.dumps(body)}], 'isError': True}
 
-    def handle(self, message, *, principal=None):
+    def handle_with_client_capabilities(self, message, *, principal=None, client_capabilities=None):
+        return self.handle(message, principal=principal, client_capabilities=client_capabilities)
+
+    def handle(self, message, *, principal=None, client_capabilities=None):
         # Discovery failures need evidence too. Never record params, client metadata,
         # raw IDs or unknown method strings; tool calls retain their existing audit.
         method = message.get('method') if isinstance(message, dict) else None
@@ -574,7 +578,7 @@ class Adapter:
             'events/list', 'events/subscribe', 'events/unsubscribe')
         try:
             if observed: self.record('protocol_request', method=method)
-            reply = self._handle(message, principal)
+            reply = self._handle(message, principal, client_capabilities)
             if observed:
                 code = reply.get('error', {}).get('code') if reply else None
                 self.record('protocol_response', method=method, error_code=code)
@@ -584,7 +588,7 @@ class Adapter:
             if not (type(identifier) is int or isinstance(identifier, str) and len(identifier) <= 128): identifier = None
             return self.error(identifier, -32603, 'Local adapter audit unavailable')
 
-    def _handle(self, message, request_principal=None):
+    def _handle(self, message, request_principal=None, client_capabilities=None):
         identifier = message.get('id') if isinstance(message, dict) else None
         if (not isinstance(message, dict) or message.get('jsonrpc') != '2.0'
                 or not isinstance(message.get('method'), str)
@@ -628,6 +632,7 @@ class Adapter:
                 if not isinstance(info, dict) or any(not isinstance(info.get(k), str) or len(info[k]) > 128 for k in ['name', 'version']):
                     raise Invalid('Invalid clientInfo')
                 self.initialized = True
+                self._client_capabilities = json.loads(json.dumps(params['capabilities']))
                 capabilities = {'tools': {'listChanged': False}}
                 if self.events_enabled: capabilities['events'] = {}
                 result = {'protocolVersion': PROTOCOL, 'capabilities': capabilities,
@@ -650,6 +655,25 @@ class Adapter:
                 fields(params, ['name', 'arguments', '_meta'], ['name'])
                 result = self.call_tool(params['name'], params.get('arguments', {}), identifier,
                                         request_principal=request_principal)
+                if params['name'] == 'codex_approval_begin' and not result.get('isError'):
+                    data = result.get('structuredContent', {}).get('data', {})
+                    client = (client_capabilities if isinstance(client_capabilities, dict) else
+                              meta.get(CAPABILITIES_META, getattr(self, '_client_capabilities', {})))
+                    elicitation = client.get('elicitation') if isinstance(client, dict) else None
+                    if (data.get('status') == 'PENDING' and isinstance(elicitation, dict)
+                            and isinstance(elicitation.get('url'), dict)):
+                        # Standard synchronous URL-elicitation error. Opening this
+                        # URL, or accepting navigation, never supplies a receipt.
+                        # The same begin call is idempotently retried only after
+                        # an authenticated human decision has been recorded.
+                        reply = self.error(identifier, -32042,
+                            'Complete the authenticated LAF approval interaction to continue.')
+                        reply['error']['data'] = {'elicitations': [{
+                            'mode': 'url', 'elicitationId': data['challenge_id'],
+                            'url': data['url'],
+                            'message': 'Review the exact pending action on the authenticated approval page.'}]}
+                        return reply
+
             elif method in ('events/list', 'events/subscribe', 'events/unsubscribe'):
                 if not self.events_enabled:
                     return self.error(identifier, -32601, 'Method not found')

@@ -1,0 +1,43 @@
+name: Sites approval provider offline checks
+
+on:
+  pull_request:
+    paths:
+      - "src/*.py"
+      - "integrations/sites-approval/**"
+      - "tests/test_sites_approval_provider.py"
+      - "tests/test_codex_approval_trial_plan.py"
+      - "tests/fixtures/sites-approval-rpc.mjs"
+      - "tests/test_codex_approval_bridge.py"
+      - "tests/test_approval_portal.py"
+      - ".github/workflows/sites-approval-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24"
+      - name: Test Worker core against offline SQLite
+        run: node --test integrations/sites-approval/service.test.mjs
+      - name: Test provider, cross-language handoff and existing approval boundaries
+        env:
+          PYTHONPATH: tests
+        run: >-
+          python3 -B -m unittest
+          test_codex_approval_bridge test_approval_portal test_sites_approval_provider
+          test_codex_approval_trial_plan
+          test_codex_schema_compatibility test_pipeline_foundation_isolated
+          test_codex_pipeline_adapter_extract test_mcp_http_transport -q
+      - name: Check source syntax
+        run: |
+          python3 -m py_compile src/sites_approval_provider.py src/codex_approval_trial_plan.py
+          node --check integrations/sites-approval/service.mjs
+          node --check integrations/sites-approval/worker.mjs

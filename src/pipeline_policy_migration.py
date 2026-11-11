@@ -61,7 +61,8 @@ def _ledger(conn):
     state = _json(conn.execute('SELECT body FROM ledger WHERE id=1').fetchone()[0])
     required = {'policy_hash', 'threads', 'tasks', 'ops', 'events'}
     if (not isinstance(state, dict) or not required <= set(state)
-            or set(state) - required - {HISTORY}
+            or set(state) - required - {HISTORY, 'approvals'}
+            or ('approvals' in state and not isinstance(state['approvals'], dict))
             or any(not isinstance(state[k], dict) for k in ['threads', 'tasks', 'ops'])
             or not isinstance(state['events'], list)):
         _fail('UNSUPPORTED_LEDGER_VERSION')
