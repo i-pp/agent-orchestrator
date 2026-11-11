@@ -2,6 +2,8 @@
 
 This candidate preserves an approval request's identity and returns bounded details through LAF MCP. It does **not** activate remote approval in the deployed daemon. The production host supplies no trusted human decision gate, so `codex_approval_decide` returns `HUMAN_APPROVAL_CHANNEL_UNAVAILABLE` before responding to Codex.
 
+The [authenticated portal MVP](approval-portal-mvp.md) adds an inert page core and standard MCP URL interaction on top of this bridge. Production authentication and runtime activation remain separate work. [Host options](approval-host-options.md) records the managed-host privacy, cost and deployment boundaries.
+
 ## Read and decide contracts
 
 - `codex_approval_get(task_id)` returns approval UUID, immutable request SHA-256, action, target fields supplied by Codex, conservative risk, source logical task/thread, native turn and item identity, and lifecycle state. Missing details remain missing; polling a `waitingOnApproval` flag does not reconstruct the original request.
@@ -35,12 +37,12 @@ Run the self-contained focused checks:
 
 ```bash
 PYTHONPATH=tests python3 -B -m unittest \
-  test_codex_approval_bridge test_codex_schema_compatibility \
+  test_codex_approval_bridge test_approval_portal test_codex_schema_compatibility \
   test_pipeline_foundation_isolated \
   test_codex_pipeline_adapter_extract test_mcp_http_transport -q
 ```
 
-The dedicated bridge CI command passes **82 tests**, including 49 approval tests, five pinned 0.167 schema-compatibility tests and 28 foundation checks. The broader current offline CI selections for MCP Events, HTTP, notifications, desktop fallback and common policy pass **277 tests**. Python compilation and `git diff --check` also pass. The new workflow runs the dedicated checks without live services, authentication changes, models, or enrollment.
+The current dedicated CI command passes **115 tests**, including 33 portal/interaction tests added to the original 82 bridge/schema/foundation tests. The broader offline selections for MCP Events, HTTP, notifications, desktop fallback and common policy, together with the new tests, pass **310 tests**. Python compilation and `git diff --check` also pass. The workflow runs these checks without live services, authentication changes, models, or enrollment.
 
 This candidate is now based on the complete current repository, not a mixed historical snapshot. All 210 tracked blobs and the root tree `26a5c5347335c2ad212d9760029642cd485d0d07` were verified against private GitHub commit `4c095bb00a0ad9e02cb2a373a013e4b25fc9a7e1`. The exact signed Git commit object was also reconstructed through the authorized GitHub API and hash-verified. The local checkout is API-materialized; no direct network clone or full history is claimed.
 
@@ -52,9 +54,11 @@ Seventeen representative stable request, response and resolution examples valida
 
 Read-only real stdio probes passed initialization, `account/read` with `refreshToken=false`, and `model/list`. No thread or model turn was created. This establishes those reads and schema compatibility, not live approval or inference.
 
-### Human decision channel: verified blocker
+### Production human decision channel remains unconfigured
 
 The installed binary also generates experimental native user-verification schemas. A separate bounded readiness probe used `userVerification/status`, which reports local readiness without prompting or backend registration. On EVO-X3 it returned **`providerUnavailable`**, with no credential. No enroll, verify, delete, registration or authenticator change was attempted.
+
+That result concerns the separate native verification provider. It does not make ordinary command/file approval responses unavailable on Linux. The portal MVP exercises those responses with fixture authentication; a real authenticated human channel is still needed before deployment.
 
 The official native verification capability is restricted to supported local UI/device/provider combinations; merely using a recognized client name or enabling `experimentalApi` does not make a compatible human approval channel. Tool annotations and ordinary model-provided arguments are not server authorization evidence.
 
