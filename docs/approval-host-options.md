@@ -12,6 +12,8 @@ The current Sites integration contract supplies `oai-authenticated-user-id`, whi
 
 Browser sign-in uses the platform's `/signin-with-chatgpt`, `/signout-with-chatgpt` and `/callback` integration. Do not create a second OAuth flow or reuse another plugin's credential. A successful login identifies the visitor, but never approves a pending action by itself. Preserve the exact-request, explicit POST and CSRF checks.
 
+The inspected identity contract does not establish a browser session ID, the original SSO authentication time, or fresh step-up/user-presence evidence. A provider port must bind its own secure browser session and CSRF state to the trusted subject. It must not represent local session creation time as proof of a fresh upstream login. Required native/platform reauthentication stays in place.
+
 For machine calls, Sites supports a Site-specific SIWC bypass token in `OAI-Sites-Authorization`. Dispatch validates the token and removes this header before forwarding; it supplies no signed-in visitor identity. The token is reusable until rotation, not a one-shot human receipt. The human decision endpoint must reject an identity-less request even if service access is valid. If additional machine authorization is used, Sites preserves the ordinary `Authorization` header for that purpose.
 
 The Site's request-staging and decision-reading API must be separate from its human decision POST. Do not expose the human decision as a Site MCP or browser-agent tool. Site MCP calls can carry authenticated user identity too, so an identity header alone is not evidence of a browser click.
@@ -48,6 +50,8 @@ No hosted step above has run. The existing candidate's 115 focused tests and 310
 ## Privacy and cost choice
 
 Current official pricing states that hosting is free through December 31, 2026. From January 1, 2027, Plus, Pro and Business usage above the plan's hosting allowance is billable; Enterprise follows its agreement. A Site with D1 has a monthly base charge even when the database is empty. Actual account billing eligibility, spend controls and accepted terms have not been inspected. Do not promise a permanently free service or enter a new paid commitment for this pilot.
+
+The proposed January 2027 rates are 25 credits per month for a Site with storage, 16 credits per 100,000 requests and 150 credits per GiB-month of database storage. Monthly allowances shared by all Sites are 125 credits for Plus, 375 for Pro and 125 per Business seat; Enterprise is contract-dependent. These are usage estimates, not a fixed currency quote. The minimum design uses neither a custom domain nor a private Sites connection. Building and editing also count toward Codex usage.
 
 Preserve a self-hosted HTTPS/OIDC or WebAuthn provider as an alternative. It needs a reachable origin, TLS, authentication enrollment and owner mapping, but avoids making LAF depend on a particular managed hosting product. The inspected local environment did not establish an existing ready-to-use browser approval origin or identity provider; it did not rule out an existing cloud identity registration.
 
