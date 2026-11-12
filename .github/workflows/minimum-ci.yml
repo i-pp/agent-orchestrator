@@ -84,27 +84,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Retrieve the reviewed checker artifact
-        shell: bash
-        env:
-          CHECKER_URL: https://github.com/i-pp/license-check-ci/releases/download/v0.1.0/license-check-0.1.0.pyz
-          CHECKER_SHA256: 2f48645fe866af8bdbe82de5665b05e79188c53f09daf0852fcc71fa6559ef0b
-        run: |
-          set -euo pipefail
-          curl --fail --location --silent --show-error \
-            --proto '=https' --proto-redir '=https' \
-            --connect-timeout 15 --max-time 120 --retry 2 \
-            "$CHECKER_URL" -o "$RUNNER_TEMP/license-check.pyz"
-          printf '%s  %s\n' "$CHECKER_SHA256" "$RUNNER_TEMP/license-check.pyz" | sha256sum --check --strict -
-      - name: Verify declared license evidence
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 -I -B "$RUNNER_TEMP/license-check.pyz" \
-            --root "$GITHUB_WORKSPACE" \
-            --policy .github/license-policy.json \
-            --report "$RUNNER_TEMP/license-report.json"
-          test -s "$RUNNER_TEMP/license-report.json"
+      - name: Verify licenses with the latest released checker
+        uses: i-pp/license-check-ci@f6f00d79e73562ae7d200abac986b2e9ce72252d
   minimum_ci:
     name: Minimum CI
     needs: [minimum, license]
