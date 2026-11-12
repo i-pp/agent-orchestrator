@@ -1,0 +1,188 @@
+KISS Open License Version 1.0
+
+1. Scope and definitions
+
+This license applies only to material that a copyright holder, or a person
+acting with that holder's authority, expressly identifies as licensed under
+KISS Open License Version 1.0. Merely placing a copy of this license in a
+repository or distribution does not change the license of other material.
+
+"Work" means that expressly identified material. It may include software,
+documentation, configuration, or other copyrightable material, in Source or
+Object form. Material expressly identified as separately licensed is not part
+of the Work for purposes of the grants in this license.
+
+"Source" means the form normally used to edit the Work. "Object" means a form
+produced by compiling, translating, or otherwise transforming Source.
+
+"Modification" means a change to, or an adaptation incorporating protectable
+expression from, the Work. A separate work does not become a Modification
+merely because it uses an interface of, is aggregated with, or is linked to the
+Work. Any copies of the Work distributed with that separate work remain subject
+to this license.
+
+"Contribution" means original material, including the initial Work, that its
+rightsholder or an authorized representative intentionally offers for inclusion
+in the Work under this license and that is incorporated into the Work.
+"Contributor" means each rightsholder on whose behalf such a Contribution is
+made. A rightsholder may act through an authorized representative; the
+rightsholder, not merely the submitting representative, makes the grants below.
+
+"You" means the person or legal entity exercising rights under this license.
+
+2. Copyright permission
+
+For copyright that each Contributor owns or has authority to license in its
+Contribution, that Contributor grants You worldwide, nonexclusive, royalty-free
+permission, without a license fee, for
+the duration of the applicable copyright. You may use, copy, change, adapt,
+display, perform, distribute, and sublicense the Work and Modifications in
+Source or Object form, for commercial or noncommercial purposes, subject to
+the conditions of this license. A Contributor may not withdraw that permission
+while You comply with those conditions.
+
+You may keep Modifications private, distribute Object form without Source,
+charge for copies or services, and incorporate the Work in proprietary
+products. This license does not require You to publish Source, disclose private
+changes, or submit changes to a Contributor.
+
+You may choose different terms for Your own material and Modifications as a
+whole, provided that recipients retain the permissions this license grants in
+the included Work and You meet this license's conditions for that Work.
+
+3. Patent permission
+
+Each Contributor grants every recipient a worldwide, nonexclusive, royalty-free,
+irrevocable patent license under patent claims that the Contributor owns or has
+authority to license, solely to the extent those claims are necessarily
+practiced by that Contributor's Contribution alone or in combination with the
+Work as it existed when the Contribution was submitted.
+
+This license permits making, having made, using, modifying, offering for sale,
+selling, importing, distributing, and otherwise transferring the Contribution
+and the applicable Work. No patent license is granted for claims outside that
+scope or for patents that the Contributor does not own or have authority to
+license. No patent right is transferred by this license.
+
+4. Conditions when distributing the Work
+
+When You distribute the Work or a Modification, in Source or Object form, You
+must satisfy all of the following conditions:
+
+(a) Provide recipients with a readable copy of this license.
+
+(b) Preserve the applicable copyright, patent, trademark, attribution, and
+license notices included with the portions of the Work that You distribute.
+You may omit a notice only to the extent it relates solely to material not
+included in Your distribution. In a Source distribution, preserve notices in
+the relevant files or their accompanying notice files. If Object form cannot
+reasonably carry a notice, reproduce that notice in a NOTICE file or license
+document supplied with that distribution.
+
+(c) Clearly identify changes You made to distributed portions of the Work.
+For Source, use a notice in each changed file or a change record that identifies
+the changed files. For Object-only distributions, an accompanying change record
+identifying the changed components is sufficient. This condition does not
+require disclosure of Source, details of a private implementation, or changes
+that You do not distribute.
+
+(d) Preserve readable attribution notices supplied in the Work's NOTICE file,
+to the extent they apply to the included material, in a NOTICE file or license
+document supplied with Your distribution. A NOTICE file supplies attribution
+information; it cannot add conditions to or change this license.
+
+Existing notices identifying particular Contributors must also be preserved
+under paragraphs (b) and (d). Attribution identifies origin and does not
+imply endorsement of Your product or Your changes.
+
+Credit in an application's screen, an About view, or a user manual is welcome
+but optional. Such optional credit does not replace the required NOTICE or
+license-document credit. A web link alone does not replace a required copy of
+this license or the required notices.
+
+5. Compiler and tool output
+
+Using a compiler or another tool covered by this license does not, by itself,
+subject the resulting output to this license. No attribution to the copyright
+holders or Contributors is required solely because a covered tool created,
+compiled, transformed, or processed that output.
+
+If output contains copied or embedded portions of the Work, those portions
+remain subject to this license to the extent permission under this license is
+needed. Nothing in this license restricts uses that do not require that
+permission, including rights available under applicable law or separate grants.
+Separately licensed material in output remains subject to its own terms.
+This section does not create an exception for copied runtime libraries,
+templates, startup code, or other included material. Neither
+use of a tool nor this section determines who owns an output or grants rights
+in a user's inputs or third-party material.
+
+6. Contributions
+
+No person is required to contribute changes. Material intentionally submitted
+for inclusion under this license is offered on these terms unless the parties
+have expressly agreed otherwise. A contribution policy may specify how a
+submitter records that choice, but cannot license material the submitter lacks
+authority to offer. A separate agreement controls only within its agreed scope.
+
+7. Third-party material
+
+Third-party material retains its own license, notices, and other applicable
+conditions. This license does not replace those terms, grant rights a
+Contributor does not hold, or authorize removal of third-party notices. Where
+a distribution includes both the Work and separately licensed material, You
+must comply with each applicable license for the material it governs.
+
+8. Names and trademarks
+
+This license grants no rights in trademarks, service marks, logos, trade names,
+or product names. It does not authorize claims of sponsorship, certification,
+or endorsement. Nothing in this section restricts truthful attribution
+required by section 4 or uses permitted independently by applicable law.
+
+9. Warranty disclaimer
+
+To the extent applicable law permits, the Work and Contributions are supplied
+as they stand, with no express or implied warranty or condition. This includes
+any warranty of ownership, absence of infringement, merchantability,
+satisfactory quality, or suitability for a particular purpose. Contributors
+make no promise that the Work is accurate, safe, secure, uninterrupted, or free
+of defects. You are responsible for deciding whether to use or distribute it.
+
+10. Liability limitation and additional undertakings
+
+To the extent applicable law permits, no Contributor is liable for loss or
+damage arising from this license or from using, distributing, or being unable
+to use the Work, regardless of legal theory, including contract or negligence,
+and even if warned of the possibility. This includes direct, indirect,
+incidental, consequential, and special loss, lost profit, lost data, and
+business interruption. This limitation does not exclude a liability that law
+forbids excluding or a liability a Contributor expressly accepts in writing.
+
+You may sell support or offer a warranty or other undertaking on Your own
+behalf and responsibility. You may not bind another Contributor or represent
+that another Contributor has accepted that undertaking without that
+Contributor's express agreement.
+
+11. Version and language
+
+The English text of KISS Open License Version 1.0 governs. A translation is
+provided only to assist understanding and does not replace or modify that
+text. A later license version applies only if a rightsholder separately offers
+the relevant material under that version; this license does not automatically
+include later versions.
+
+12. Compliance and reinstatement
+
+If You violate a condition of this license, Your copyright permissions under
+section 2 terminate automatically. Those permissions are reinstated when You
+cease the violation and remedy its effects to the extent reasonably possible.
+Reinstatement does not excuse liability for violations occurring before the
+remedy. The patent permissions granted under section 3 remain irrevocable and
+are not terminated by this section.
+
+Termination of Your permissions does not terminate permissions already granted
+under this license to recipients of copies distributed while You were in
+compliance, provided those recipients comply with this license. Each recipient
+remains responsible for its own compliance.
+

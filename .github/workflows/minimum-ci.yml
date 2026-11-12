@@ -1,0 +1,77 @@
+# KISS Open License Version 1.0 (KOL-v1)
+# 
+# SPDX-FileCopyrightText: 2026 I-plusplus Inc.
+# SPDX-License-Identifier: LicenseRef-KOL-v1
+# 
+# Copyright remains with its respective holders; original copyright and attribution notices must be preserved.
+# Contributors may add copyright notices for their own original modifications.
+# Distributed modifications must be identified as required by Section 4(c) of KOL-v1.
+# 
+# Use, modification, distribution, and incorporation into commercial or proprietary software are permitted
+# without license fees or source disclosure, subject to all terms of the complete KOL-v1 license.
+# 
+# Contributors grant the patent permissions stated in KOL-v1. Outputs are not covered merely because a
+# KOL-licensed tool produced them; embedded licensed material remains subject to applicable license terms.
+# 
+# THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OR LIABILITY TO THE EXTENT PERMITTED BY APPLICABLE LAW.
+# 
+# This header is a summary, not a separate license or an amendment to KOL-v1.
+# All terms and conditions of KOL-v1 apply. See the accompanying LICENSE file for the complete license text.
+name: Minimum CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  minimum:
+    name: Minimum CI
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validate tracked Python and JSON sources
+        run: |
+          python3 -B - <<'PY'
+          import ast
+          import json
+          import pathlib
+          import subprocess
+          files = subprocess.check_output(["git", "ls-files", "-z"]).decode().split("\0")
+          checked = 0
+          for name in filter(None, files):
+              path = pathlib.Path(name)
+              if path.suffix == ".py":
+                  ast.parse(path.read_bytes(), filename=name)
+                  checked += 1
+              elif path.suffix == ".json":
+                  json.loads(path.read_bytes())
+                  checked += 1
+          if checked == 0:
+              raise SystemExit("No source files checked")
+          print(f"Validated {checked} Python/JSON files")
+          PY
+      - name: Run bounded offline regression tests
+        run: |
+          python3 -B - <<'PY'
+          import unittest
+          loader = unittest.TestLoader()
+          import sys
+          sys.path.insert(0, "tests")
+          suite = loader.loadTestsFromNames(["test_codex_approval_bridge", "test_approval_portal"])
+          if suite.countTestCases() < 82:
+              raise SystemExit("Regression suite unexpectedly empty or reduced")
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          if not result.wasSuccessful() or result.skipped:
+              raise SystemExit("Regression tests failed or were skipped")
+          PY
+      - name: Check local documentation links
+        run: python3 -B scripts/check_markdown_links.py
