@@ -31,7 +31,7 @@ permissions:
 
 jobs:
   minimum:
-    name: Minimum CI
+    name: Minimum source checks
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -75,3 +75,49 @@ jobs:
           PY
       - name: Check local documentation links
         run: python3 -B scripts/check_markdown_links.py
+
+  license:
+    name: License policy checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Retrieve the reviewed checker artifact
+        shell: bash
+        env:
+          CHECKER_URL: https://github.com/i-pp/license-check-ci/releases/download/v0.1.0/license-check-0.1.0.pyz
+          CHECKER_SHA256: 2f48645fe866af8bdbe82de5665b05e79188c53f09daf0852fcc71fa6559ef0b
+        run: |
+          set -euo pipefail
+          curl --fail --location --silent --show-error \
+            --proto '=https' --proto-redir '=https' \
+            --connect-timeout 15 --max-time 120 --retry 2 \
+            "$CHECKER_URL" -o "$RUNNER_TEMP/license-check.pyz"
+          printf '%s  %s\n' "$CHECKER_SHA256" "$RUNNER_TEMP/license-check.pyz" | sha256sum --check --strict -
+      - name: Verify declared license evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -I -B "$RUNNER_TEMP/license-check.pyz" \
+            --root "$GITHUB_WORKSPACE" \
+            --policy .github/license-policy.json \
+            --report "$RUNNER_TEMP/license-report.json"
+          test -s "$RUNNER_TEMP/license-report.json"
+  minimum_ci:
+    name: Minimum CI
+    needs: [minimum, license]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require all minimum checks to succeed
+        shell: bash
+        env:
+          SOURCE_RESULT: ${{ needs.minimum.result }}
+          LICENSE_RESULT: ${{ needs.license.result }}
+        run: |
+          set -euo pipefail
+          test "$SOURCE_RESULT" = success
+          test "$LICENSE_RESULT" = success
