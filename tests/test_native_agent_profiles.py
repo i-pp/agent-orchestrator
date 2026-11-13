@@ -27,6 +27,22 @@ cli = importlib.util.module_from_spec(loader)
 loader.loader.exec_module(cli)
 
 
+# Deliberately independent expectations: a uniform profile is a regression.
+EXPECTED_SELECTIONS = {
+    'ImplementerQuick': ('gpt-6-luna', 'max'),
+    'Researcher': ('gpt-6-luna', 'max'),
+    'DocumentationReviewer': ('gpt-6-luna', 'max'),
+    'Verifier': ('gpt-6-luna', 'max'),
+    'Implementer': ('gpt-6.1-sol', 'high'),
+    'IndependentReviewer': ('gpt-6.1-sol', 'high'),
+    'TestReviewer': ('gpt-6.1-sol', 'high'),
+    'PerformanceReviewer': ('gpt-6.1-sol', 'high'),
+    'Orchestrator': ('gpt-6.1-sol', 'high'),
+    'ImplementerAdvanced': ('gpt-6.1-sol', 'max'),
+    'SecurityReviewer': ('gpt-6.1-sol', 'max'),
+}
+
+
 class RecommendationTests(unittest.TestCase):
     def test_three_implementation_levels_are_distinct_but_keep_reviews(self):
         for level, role in [('quick', 'ImplementerQuick'), ('standard', 'Implementer'),
@@ -87,17 +103,17 @@ class RecommendationTests(unittest.TestCase):
         self.assertEqual(registry()['budgets'], BUDGET_CEILINGS)
         self.assertFalse(registry()['backends']['local']['dispatch_enabled'])
 
-    def test_all_checked_in_profiles_explicitly_select_sol_max(self):
+    def test_checked_in_profiles_select_models_and_effort_by_role(self):
         expected = {native + '.toml' for name, (native, _) in ROLES.items() if name != 'Coordinator'}
         self.assertEqual({p.name for p in (PROJECT / '.codex/agents').glob('*.toml')}, expected)
         for role in set(ROLES) - {'Coordinator'}:
             _, value = load_profile(PROJECT, role)
-            self.assertEqual(value['model'], 'gpt-6.1-sol')
-            self.assertEqual(value['model_reasoning_effort'], 'max')
+            self.assertEqual((value['model'], value['model_reasoning_effort']),
+                             EXPECTED_SELECTIONS[role])
         project = tomllib.loads((PROJECT / '.codex/config.toml').read_text())['agents']
         self.assertEqual(project['max_concurrent_threads_per_session'], 6)
         self.assertEqual(project['default_subagent_model'], 'gpt-6.1-sol')
-        self.assertEqual(project['default_subagent_reasoning_effort'], 'max')
+        self.assertEqual(project['default_subagent_reasoning_effort'], 'high')
 
     def test_cli_reads_actual_profile_settings_without_starting_a_run(self):
         with patch('sys.stdout', new_callable=io.StringIO) as output:
@@ -108,8 +124,8 @@ class RecommendationTests(unittest.TestCase):
         self.assertFalse(result['automatic_retry'])
         self.assertFalse(result['availability_verified'])
         for item in result['assignments']:
-            self.assertEqual(item['model'], 'gpt-6.1-sol')
-            self.assertEqual(item['reasoning_effort'], 'max')
+            self.assertEqual((item['model'], item['reasoning_effort']),
+                             EXPECTED_SELECTIONS[item['role']])
             self.assertEqual(len(item['profile_sha256']), 64)
         with patch('sys.stdout', new_callable=io.StringIO) as output:
             self.assertEqual(cli.main(['--purpose', 'implementation', '--parallel-parts', '24']), 2)
@@ -265,6 +281,39 @@ class ModelHandoffTests(unittest.TestCase):
                 self.assertEqual(prompt['model'], 'gpt-6.1-sol')
                 self.assertEqual(prompt['reasoning_effort'], 'max')
 
+    def test_checked_in_role_settings_reach_spawn_and_immutable_context(self):
+        for role, selection in EXPECTED_SELECTIONS.items():
+            native = ROLES[role][0]
+            profile = Path('.codex/agents') / (native + '.toml')
+            (self.f.f.project / profile).write_bytes((PROJECT / profile).read_bytes())
+            adapter = self.new_adapter(role, 'actual-' + role)
+            call = adapter.step()['tool_calls'][0]
+            self.assertEqual((call['arguments']['model'], call['arguments']['reasoning_effort']), selection)
+            ref = call['context_ref']
+            message = adapter.context(ref['key'], ref['sha256'])['message']
+            prompt = json.loads(message.split('\nTASK\n')[1])
+            self.assertEqual((prompt['model'], prompt['reasoning_effort']), selection)
+
+    def test_each_supported_native_pair_is_forwarded_without_substitution(self):
+        from native_agent_profiles import MODEL_EFFORTS
+        path = self.f.f.project / '.codex/agents/researcher.toml'
+        source = path.read_text()
+        for model, efforts in MODEL_EFFORTS.items():
+            for effort in efforts:
+                path.write_text(source.replace('gpt-6.1-sol', model).replace(
+                    'model_reasoning_effort = "max"', 'model_reasoning_effort = "' + effort + '"'))
+                call = self.new_adapter('Researcher', model + '-' + effort).step()['tool_calls'][0]
+                self.assertEqual((call['arguments']['model'], call['arguments']['reasoning_effort']),
+                                 (model, effort))
+        path.write_text(source)
+
+    def test_model_specific_unsupported_pair_is_rejected(self):
+        path = self.f.f.project / '.codex/agents/researcher.toml'
+        path.write_text(path.read_text().replace('gpt-6.1-sol', 'gpt-6-luna').replace(
+            'model_reasoning_effort = "max"', 'model_reasoning_effort = "ultra"'))
+        with self.assertRaisesRegex(AdapterError, 'UNSUPPORTED_ROLE_SETTINGS'):
+            self.new_adapter('Researcher', 'luna-ultra')
+
     def test_fallback_is_an_explicit_new_profile_choice_never_a_failed_spawn_retry(self):
         # Availability/permission is the parent's pre-dispatch responsibility.
         path = self.f.f.project / '.codex/agents/researcher.toml'
@@ -293,7 +342,7 @@ class ModelHandoffTests(unittest.TestCase):
         for i, replacement in enumerate([
                 source.replace('gpt-6.1-sol', 'gpt-6-astra'),
                 source.replace('gpt-6.1-sol', 'gpt-6-sol'),
-                source.replace('model_reasoning_effort = "max"', 'model_reasoning_effort = "high"'),
+                source.replace('model_reasoning_effort = "max"', 'model_reasoning_effort = "unadvertised"'),
                 source.replace('model = "gpt-6.1-sol"\n', ''),
                 source + '\nsandbox_mode = "danger-full-access"\n']):
             path.write_text(replacement)
@@ -312,7 +361,7 @@ class ModelHandoffTests(unittest.TestCase):
 
     def test_tool_contract_rejects_implicit_or_unapproved_models(self):
         call = self.new_adapter('Researcher', 'contract').step()['tool_calls'][0]
-        for key, value in [('model', 'gpt-6-astra'), ('reasoning_effort', 'high'), ('fork_turns', 'all')]:
+        for key, value in [('model', 'gpt-6-astra'), ('reasoning_effort', 'unadvertised'), ('fork_turns', 'all')]:
             args = deepcopy(call['arguments'])
             args[key] = value
             with self.assertRaises(AdapterError):

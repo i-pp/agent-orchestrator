@@ -20,6 +20,19 @@ ROLES = {
 }
 MODELS = {'gpt-6.1-sol', 'gpt-6-luna'}
 PRIMARY_MODEL = 'gpt-6.1-sol'
+# Native collaboration compatibility, not provider/account availability.
+MODEL_EFFORTS = {
+    'gpt-6.1-sol': frozenset({'low', 'medium', 'high', 'xhigh', 'max', 'ultra'}),
+    'gpt-6-luna': frozenset({'low', 'medium', 'high', 'xhigh', 'max'}),
+}
+
+
+def supported_selection(model, effort):
+    """Validate explicit native settings without inventing account entitlement."""
+    return (isinstance(model, str) and isinstance(effort, str)
+            and effort in MODEL_EFFORTS.get(model, ()))
+
+
 REVIEW_ROLES = {
     'correctness': 'IndependentReviewer',
     'security': 'SecurityReviewer',
@@ -107,8 +120,7 @@ def load_profile(project, role):
                        'model', 'model_reasoning_effort'}
             or value['name'] != native
             or any(not isinstance(v, str) or not v.strip() for v in value.values())
-            or value['model'] not in MODELS
-            or value['model_reasoning_effort'] != 'max'):
+            or not supported_selection(value['model'], value['model_reasoning_effort'])):
         raise ValueError('UNSUPPORTED_ROLE_SETTINGS')
     return raw, value
 

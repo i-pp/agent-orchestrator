@@ -15,7 +15,7 @@ from native_team import sha
 from chat_mailbox import _json
 from native_team_artifacts import _no_symlinks
 from native_handoff import HandoffStore
-from native_agent_profiles import ROLES as ROLE_PROFILES, MODELS, load_profile
+from native_agent_profiles import ROLES as ROLE_PROFILES, load_profile, supported_selection
 
 PROFILE = 'collaboration-parent-v4'
 TOOLS = {
@@ -122,8 +122,9 @@ class NativeParentAdapter:
     def _call(tool, arguments, actions):
         if tool not in TOOLS or set(arguments) != TOOLS[tool]:
             raise AdapterError('TOOL_CONTRACT_MISMATCH')
-        if tool == 'collaboration.spawn_agent' and (arguments['model'] not in MODELS
-                or arguments['reasoning_effort'] != 'max' or arguments['fork_turns'] != 'none'):
+        if tool == 'collaboration.spawn_agent' and (
+                not supported_selection(arguments['model'], arguments['reasoning_effort'])
+                or arguments['fork_turns'] != 'none'):
             raise AdapterError('UNSUPPORTED_MODEL_SELECTION')
         return {'tool': tool, 'arguments': arguments, 'action_ids': actions}
 

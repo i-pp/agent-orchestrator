@@ -38,7 +38,17 @@ Multiple workers can share an implementation level, but never a writable checkou
 
 ## Explicit models and bounded parallelism
 
-`.codex/config.toml` sets project defaults for new trusted sessions. Each `.codex/agents/*.toml` also sets `model = "gpt-6.1-sol"` and `model_reasoning_effort = "max"`. The [v4 parent adapter](native-parent-adapter.md) reads and pins these profiles, then passes `model` and `reasoning_effort` through the current documented collaboration spawn contract. It rejects unsupported or missing settings instead of dropping them.
+`.codex/config.toml` sets the standard `gpt-6.1-sol` / `high` default for new trusted sessions. Each `.codex/agents/*.toml` explicitly selects both settings by responsibility; lightweight work is not forced onto the strongest model.
+
+| Assignment | Model | Reasoning effort | Rationale |
+| --- | --- | --- | --- |
+| Quick Implementer, Researcher, Documentation Reviewer, Verifier | `gpt-6-luna` | `max` | Narrow edits, bounded evidence gathering, documentation checks, and specified acceptance checks. |
+| Implementer, Independent Reviewer, Test Reviewer, Performance Reviewer, Orchestrator | `gpt-6.1-sol` | `high` | Design-aware implementation, judgment across behavior and tests, and bounded dependency planning. |
+| Advanced Implementer, Security Reviewer | `gpt-6.1-sol` | `max` | Ambiguous cross-module contracts, concurrency/recovery, and security-sensitive boundaries. |
+
+These are starting profiles, not measured quality or cost guarantees. The parent must raise the model or effort before dispatch when a nominally simple assignment contains ambiguous evidence, consequential risk, or substantial rework potential. Conversely, bounded work may use a lower supported effort when its acceptance criteria are clear. Never change an in-flight run's pinned profile. A known failed attempt can inform a new scoped assignment; an uncertain attempt must first be reconciled, not retried on another model.
+
+The [v4 parent adapter](native-parent-adapter.md) reads and pins these profiles, then passes `model` and `reasoning_effort` through the current documented collaboration spawn contract. It rejects unsupported or missing settings instead of dropping them.
 
 Model choice, fallback permission, and uncertain-generation handling come from the verified pinned [canonical model-selection policy](https://github.com/i-pp/ai-orchestration/blob/main/docs/ai/orchestration.md#explicit-model-selection), not a second rule set here. The v4 implementation accepts only the model/effort values in `src/native_agent_profiles.py`, freezes the selected role file for a run, and does not implement automatic fallback. The parent checks actual executor support and task constraints before configuration. Requested settings and observed execution metadata are different evidence; a passing offline test is not proof of an actual model invocation.
 
