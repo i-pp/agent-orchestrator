@@ -35,6 +35,11 @@ SERVER_META = 'io.modelcontextprotocol/serverInfo'
 SERVER_INFO = {'name': 'agent-orchestrator-local', 'version': '0.2.0'}
 MAX_INPUT = 65536
 MAX_OUTPUT = 65536
+# Public data is duplicated into text and structuredContent, then JSON escaped.
+OWNER_LIST_DATA_BYTES = 20 * 1024
+OWNER_LIST_SCAN_RECORDS = 80
+OWNER_LIST_SCAN_PAGES = 80
+OWNER_LIST_SCAN_SECONDS = 5
 AUDIT_LIMIT = 4 * 1024**2
 TIMEOUT = 2
 KEY_PATTERN = r'^[A-Za-z0-9_.:-]{1,128}$'
@@ -298,15 +303,24 @@ class Adapter:
         if (not isinstance(principal, LocalPrincipal) or not self.events_enabled
                 or runtime is None or getattr(runtime, 'outbox', None) is None):
             raise Invalid('Authenticated task ACL unavailable')
-        records = []
+        records, scanned, cursors = [], 0, set()
         cursor = None
-        for _page_number in range(4):
+        deadline = time.monotonic() + OWNER_LIST_SCAN_SECONDS
+        for _page_number in range(OWNER_LIST_SCAN_PAGES):
+            if time.monotonic() >= deadline:
+                raise Invalid('Owner listing scan deadline reached')
             page_args = {'limit': 20}
             if cursor is not None:
                 page_args['cursor'] = cursor
             page = self.pipeline.dispatch('codex_threads_list', page_args)
-            if not isinstance(page, dict):
+            if time.monotonic() >= deadline:
+                raise Invalid('Owner listing scan deadline reached')
+            if (not isinstance(page, dict) or not isinstance(page.get('threads'), list)
+                    or not isinstance(page.get('tasks'), list)):
                 raise Invalid('Invalid pipeline listing')
+            scanned += len(page['threads']) + len(page['tasks'])
+            if scanned > OWNER_LIST_SCAN_RECORDS:
+                raise Invalid('Owner listing exceeds bounded record count')
             for thread in page.get('threads', []):
                 if (isinstance(thread, dict) and runtime.outbox.thread_owned_by(
                         thread.get('id'), principal)):
@@ -318,6 +332,10 @@ class Adapter:
             cursor = page.get('next_cursor')
             if cursor is None:
                 break
+            if (not isinstance(cursor, str) or not re.fullmatch(r'[a-f0-9]{64}:[0-9]{1,6}', cursor)
+                    or cursor in cursors):
+                raise Invalid('Invalid pipeline listing cursor')
+            cursors.add(cursor)
         else:
             raise Invalid('Owner listing exceeds bounded page count')
         snapshot = hashlib.sha256(json.dumps(records, sort_keys=True,
@@ -332,12 +350,18 @@ class Adapter:
             if offset > len(records):
                 raise Invalid('Invalid owner listing cursor')
         limit = arguments.get('limit', 20)
-        page_records = records[offset:offset + limit]
-        next_offset = offset + len(page_records)
-        return {'threads': [item['data'] for item in page_records if item['kind'] == 'thread'],
-                'tasks': [item['data'] for item in page_records if item['kind'] == 'task'],
-                'total_records': len(records),
-                'next_cursor': f'{snapshot}:{next_offset}' if next_offset < len(records) else None}
+        end = min(len(records), offset + limit)
+        while True:
+            page_records = records[offset:end]
+            result = {'threads': [item['data'] for item in page_records if item['kind'] == 'thread'],
+                      'tasks': [item['data'] for item in page_records if item['kind'] == 'task'],
+                      'total_records': len(records),
+                      'next_cursor': f'{snapshot}:{end}' if end < len(records) else None}
+            if len(json.dumps(result, ensure_ascii=True, allow_nan=False).encode()) <= OWNER_LIST_DATA_BYTES:
+                return result
+            end -= 1
+            if end <= offset:
+                raise Invalid('Owner listing exceeds bounded record size')
 
     def _owner_scoped_events(self, principal, arguments):
         runtime = self.notification_runtime
@@ -349,6 +373,23 @@ class Adapter:
                 principal, after=arguments.get('after', 0), limit=arguments.get('limit', 20))
         except NotificationError:
             raise Invalid('Event history unavailable') from None
+
+    def _confirmed_blocked_input(self, name, arguments, data, principal):
+        """Retain local-owner access only after exact durable creation proof."""
+        runtime = self.notification_runtime
+        outbox = getattr(runtime, 'outbox', None)
+        if (not isinstance(principal, LocalPrincipal) or not self.events_enabled
+                or outbox is None or name not in ('codex_chat_store', 'codex_task_submit')):
+            return False
+        try:
+            if Path(outbox.source_path).absolute() != self.root / 'codex-pipeline.sqlite3':
+                return False
+            return (outbox.thread_owned_by(arguments['thread_id'], principal)
+                    and outbox.source_blocked_input_matches(name, arguments, data) is True)
+        except Exception:
+            # Unavailable or ambiguous proof cannot grant access. The input may
+            # already exist; never create, resubmit or rebind it as recovery.
+            return False
 
     def call_tool(self, name, arguments, rpc_id, request_principal=None):
         if name not in {t['name'] for t in self.tools}: raise Invalid('Tool is not enabled')
@@ -409,7 +450,7 @@ class Adapter:
                     if name == 'codex_pipeline_tick':
                         raise Invalid('Shared pipeline tick is unavailable to per-user callers')
                     if name in ('codex_thread_start', 'codex_threads_list', 'codex_events',
-                                'codex_capabilities'):
+                                'codex_capabilities', 'codex_models_list'):
                         if (not self.events_enabled or self.notification_runtime is None
                                 or getattr(self.notification_runtime, 'outbox', None) is None):
                             raise Invalid('Authenticated task ACL unavailable')
@@ -449,7 +490,9 @@ class Adapter:
                               or data.get('state') in ('UNKNOWN', 'BLOCKED'))
                 except PipelineError as exc:
                     data, failed = exc.result(), True
-                if (isinstance(request_principal, LocalPrincipal) and not failed
+                blocked_input = (failed and self._confirmed_blocked_input(
+                    name, arguments, data, request_principal))
+                if (isinstance(request_principal, LocalPrincipal) and (not failed or blocked_input)
                         and self.events_enabled and isinstance(data, dict)):
                     if name == 'codex_thread_start':
                         thread_id = data.get('thread_id')
@@ -469,7 +512,7 @@ class Adapter:
                                 # The operation may already have committed; never replay it here.
                                 data['access_binding'] = 'UNAVAILABLE'
                 if (name in ('codex_task_submit', 'codex_chat_store')
-                        and self.events_enabled and not failed
+                        and self.events_enabled and (not failed or blocked_input)
                         and isinstance(data, dict)):
                     task_id = data.get('task_id') or data.get('id')
                     if task_id:

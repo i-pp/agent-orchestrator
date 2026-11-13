@@ -16,6 +16,7 @@ import time
 import uuid
 
 from native_team_plan import Plan
+from native_agent_profiles import role_registry, BUDGET_CEILINGS, configured_budgets
 from native_team_artifacts import fingerprint,_paths,_no_symlinks
 from storage import runtime_lock
 from chat_mailbox import _json,_private
@@ -33,14 +34,14 @@ def common_dir(path):
     return str((path/value).resolve()) if not value.is_absolute() else str(value.resolve())
 def sha(value):return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
 
-def registry():
-    return {'roles':{'Implementer':{'native_role':'implementer','writes':'own worktree only'},
-        'Verifier':{'native_role':'verifier','writes':'verification outputs only'},
-        'Researcher':{'native_role':'researcher','writes':'none'},'Coordinator':{'native_role':'parent','writes':'integration only'}},
-        'backends':{'cloud':{'dispatch_enabled':True,'provider':'inherited'},
-                    'local':{'dispatch_enabled':False,'reason':'Separate approval and real API verification required'}},
-        'budgets':{'cloud_concurrency':2,'local_concurrency':1,'max_dispatches':6,'max_retries':2,
-                   'task_timeout_s':300,'run_timeout_s':900}}
+def registry(project=None, *, cloud_concurrency=None, executor_limit=None):
+    budgets, _ = configured_budgets(project, requested=cloud_concurrency,
+                                    executor_limit=executor_limit)
+    return {'roles': role_registry(),
+            'backends': {'cloud': {'dispatch_enabled': True, 'provider': 'explicit-role-model'},
+                         'local': {'dispatch_enabled': False,
+                                   'reason': 'Separate approval and real API verification required'}},
+            'budgets': budgets}
 
 class NativeTeam:
     def __init__(self,root,clock=time.time):
@@ -63,8 +64,7 @@ class NativeTeam:
         reg=spec['registry']
         if set(reg)!={'roles','backends','budgets'}:raise ValueError('INVALID_REGISTRY')
         p=Plan(spec['tasks'],reg['roles'],reg['budgets'])
-        for key,limit in {'cloud_concurrency':2,'local_concurrency':1,'max_dispatches':6,'max_retries':2,
-                          'task_timeout_s':300,'run_timeout_s':900}.items():
+        for key,limit in BUDGET_CEILINGS.items():
             if reg['budgets'][key]>limit:raise ValueError('PROJECT_BUDGET_CEILING')
         if set(reg['backends'])!={'cloud','local'} or reg['backends']['local'].get('dispatch_enabled') is not False:
             raise ValueError('LOCAL_BACKEND_NOT_AUTHORIZED')

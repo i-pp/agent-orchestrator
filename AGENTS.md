@@ -1,24 +1,25 @@
-# 共通ポリシーとproject固有の作業指示
+# Common policy and project instructions
 
-共通指示の正本は [`i-pp/ai-orchestration`](https://github.com/i-pp/ai-orchestration) のdocs/ai/orchestration.md・docs/ai/policies.md・agents/README.mdと、Editorial Policy v2.0のdocs/ai/editorial-policy.md・policies/editorial.md。`config/upstream-policy.json`で5文書のcommitと各hashを固定し、既存ローカルcheckoutの固定Git内容を読む。編集規約は技術記事とその編集・引継ぎに適用し、一般の実装タスクの出力形式を記事形式に変えない。本文をこのrepoへ複製管理しない。旧 [`policies.md`](policies.md) v1.0はhash固定の履歴として保全し、現在の共通本文として二重注入しない。開始時に次を実行し、検証済みの本文・version・SHA-256を実際に受け取ってからpolicy依存の作業へ適用する。
+The common-policy source of truth is [`i-pp/ai-orchestration`](https://github.com/i-pp/ai-orchestration): `docs/ai/orchestration.md`, `docs/ai/policies.md`, `agents/README.md`, `docs/ai/editorial-policy.md`, and `policies/editorial.md`. `config/upstream-policy.json` pins the commit and hashes of all five documents. Read their immutable Git content from an existing local checkout. Editorial rules apply to technical articles and their editing/handoffs, not to the format of ordinary implementation results. Do not duplicate the canonical policy bodies here. Preserve the hash-pinned legacy [`policies.md`](policies.md) v1.0 as historical evidence; do not inject it as a second current policy.
+
+Before policy-dependent work, run:
 
 ```bash
 python3 -B scripts/policy_context.py --format inspect
 ```
 
-リンクを見ただけ、見出しだけを読んだ状態を「読込み済み」としない。読込み失敗・hash/version不一致・競合は推測や自動修復で補わず、該当作業を止めて原因を報告する。独立した安全な作業は継続できる。
+Actually read the verified body, version, SHA-256, loaded revision, and checkout metadata. Reading a link or headings is not a successful policy load. On a load failure, hash/version mismatch, or policy conflict, stop the affected work and report the cause. Do not guess, weaken checks, or silently repair the source. Independent safe work may continue.
 
-実行環境の上位規則・権限、ユーザーの明示的な制約が共通ポリシーより優先する。共通ポリシーやproject/role指示は権限を増やさず、承認範囲を拡張しない。project固有設定はこの範囲内で共通指示を具体化する。
+Higher-priority execution rules, environment permissions, and the user's explicit constraints take precedence. Common policy and project/role instructions do not grant permissions or broaden authorization.
 
-## Project固有の参照先と境界
+## Project references and boundaries
 
-- 採用する共通版とhash：`config/upstream-policy.json`。`config/policy.json`が採用を必須化する。pathの相対基準はrepo root、~はuser homeへ展開。ローカル設定`config/policy-source.local.json`はGit除外し、読んだcommit/hash/dirtyを記録する。旧版の検証情報は`policies/manifest.json`。
-- 本文の送信経路と環境ごとの確認範囲：`docs/common-policy.md`。
-- nativeの同時子2枠：`.codex/config.toml`。各role：`.codex/agents/`。子は孫を作らない。
-- 既存runnerの時間・資源設定：`scheduler-config.json`、`resource-limits.json`。native作業の各子300秒/全体900秒、初回1回＋retry最大2回、および実装・検証・統合の手順：`docs/native-agent-team.md`。
-- 既存daemon/Tunnel/認証/model/global config/MCP公開、repo信頼登録は今回の変更対象外。local providerは未検証のため起動しない。既存30Bを共有する方針を、利用可能・health確認済みとは扱わない。
-- eSOL業務とProject-KISSのソース・秘密・記録を別workspace/文脈に分ける。無関係な既存差分を保全し、merge/push/公開をしない。
+- Policy adoption: `config/upstream-policy.json`, required by `config/policy.json`. Relative paths are repository-root relative; `~` expands to the user home. The ignored `config/policy-source.local.json` selects an existing checkout/commit; its loaded revision, hashes, and dirty state are recorded. The legacy pin is in `policies/manifest.json`.
+- Policy transport and environment-specific evidence: [`docs/common-policy.md`](docs/common-policy.md). A reference update is not proof that every environment loaded it.
+- Native team selection: [`docs/native-agent-team.md`](docs/native-agent-team.md), `.codex/config.toml`, and `.codex/agents/`. Use `scripts/plan_native_team.py` for a non-executing role recommendation. Select quick, standard, or advanced implementers, focused independent reviewers, and an advisory orchestrator as useful. Workers are leaves; the parent owns dispatch and integration.
+- Model selection and fallback authority: follow the verified pinned [canonical model-selection policy](https://github.com/i-pp/ai-orchestration/blob/main/docs/ai/orchestration.md#explicit-model-selection). Inspect actual project/role settings in `.codex/config.toml` and `.codex/agents/`; the executable supported-value checks are in `src/native_agent_profiles.py`. These implementation settings do not replace the canonical policy or the user's stricter task constraints. See the [native guide](docs/native-agent-team.md#explicit-models-and-bounded-parallelism) for the v4 transport boundary.
+- Native budgets: at most six cloud workers, 24 total dispatches, two retries for known failures, 300 seconds per task, and 900 seconds per run. A task or executor may impose lower limits. Unknown/timed-out workers retain their slots until actual terminal confirmation. These are per-run limits, not host-wide hard quotas.
+- Existing runner time/resource settings remain in `scheduler-config.json` and `resource-limits.json`. Native team changes do not modify daemon, Tunnel, authentication, global model/MCP configuration, public exposure, or repository trust. Do not start an unverified local provider or infer that a shared 30B model is available or healthy.
+- Keep eSOL business sources, secrets, and records separate from Project-KISS workspaces and context. Preserve unrelated existing changes. Push, merge, publish, and deployment require authorization for their exact scope; this role file supplies none.
 
-共通ポリシーの全文はここやrole/Skillへ再掲しない。runtimeによる本文注入とnative/Skillの読込み実績は区別し、参照更新だけで全環境への自動適用完了と報告しない。
-
-追加運用制約（2026-10-29）: Codexの隔離環境内でbwrap/unshare等による追加の隔離環境を作らない。隔離必須の評価は隔離なしに切り替えず、`BLOCKED`・理由・未実行を記録する。判定不能は`UNKNOWN`として保留し、未実行をPASSやモデル品質FAILに数えない。独立した通常の編集・検査は継続する。コードで強制する範囲と規約の範囲は`docs/nested-isolation-guard.md`を参照する。共通ポリシーv1.0の本文とは別の追加制約とする。
+Do not create nested isolation with `bwrap`, `unshare`, or equivalent inside an already isolated Codex environment. If an evaluation requires isolation that is unavailable, record `BLOCKED`, its reason, and what did not run; do not switch to an unisolated evaluation. Record uncertain outcomes as `UNKNOWN`, not a pass or model-quality failure. Continue independent ordinary edits/checks. See [`docs/nested-isolation-guard.md`](docs/nested-isolation-guard.md) for the code-enforced boundary. This restriction is separate from the legacy v1.0 policy body.

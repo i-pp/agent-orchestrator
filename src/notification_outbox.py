@@ -6,7 +6,7 @@ these storage APIs. Callers must provide a secret-encryption provider and a
 transport that pins validated public IPs, preserves TLS hostname checks, and
 refuses redirects. No transport is configured by default.
 """
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 import base64
 import hashlib
@@ -44,6 +44,13 @@ BLOCKED_REASON_CODES = frozenset({
     'SUBSCRIPTION_AUTH_REQUIRED',
     'RESUME_REJECTED',
     'RESUME_SCOPE_MISMATCH',
+    'REASONING_EFFORT_NOT_SUPPORTED',
+    'LEGACY_REASONING_EFFORT_MISSING',
+    'IMMUTABLE_MODEL_SELECTION_CHANGED',
+    'MODEL_CATALOG_UNKNOWN',
+    'MODEL_CATALOG_INVALID',
+    'MODEL_CATALOG_BOUND',
+    'RESUME_REASONING_EFFORT_MISMATCH',
 })
 DELIVERY_STATES = frozenset({
     'PENDING', 'DELIVERING', 'RETRY', 'UNKNOWN', 'DELIVERED',
@@ -693,6 +700,82 @@ class NotificationOutbox:
         if not isinstance(events, list):
             raise NotificationError('INVALID_EVENT_LEDGER')
         return events
+
+    def source_blocked_input_matches(self, tool, arguments, result):
+        """Prove one persisted pre-turn input, without granting an ACL.
+
+        The bounded private ledger is also available behind a daemon proxy.
+        A returned ID or BLOCKED label alone is not creation/ownership proof.
+        Callers must separately check thread ownership and use the existing
+        Events authorizer and immutable task-origin binding transaction.
+        """
+        if (tool not in ('codex_chat_store', 'codex_task_submit')
+                or type(arguments) is not dict or type(result) is not dict
+                or 'status' in result or result.get('state') != 'BLOCKED'
+                or result.get('execution_started') is not False
+                or result.get('reason_code') not in BLOCKED_REASON_CODES):
+            return False
+        task_id, thread_id = result.get('id'), arguments.get('thread_id')
+        if (not isinstance(task_id, str) or UUID_RE.fullmatch(task_id) is None
+                or result.get('thread_id') != thread_id):
+            return False
+        from private_state import _private, _json
+        from codex_pipeline import LEDGER_BYTES, digest
+        path = self.source_path
+        if (any(parent.is_symlink() for parent in [path, *path.parents])
+                or path.parent.stat().st_uid != os.getuid()
+                or stat.S_IMODE(path.parent.stat().st_mode) != 0o700):
+            raise NotificationError('UNSAFE_SOURCE_PATH')
+        _private(path, 8 * 1024**2)
+        identity = path.stat()
+        # One bounded SELECT is a consistent snapshot. mode=ro cannot create
+        # a missing source and query_only disallows data changes.
+        with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=2)) as conn:
+            conn.execute('PRAGMA query_only=ON')
+            row = conn.execute('SELECT substr(CAST(body AS BLOB),1,?) FROM ledger WHERE id=1',
+                               (LEDGER_BYTES + 1,)).fetchone()
+        _private(path, 8 * 1024**2)
+        current = path.stat()
+        if ((identity.st_dev, identity.st_ino) != (current.st_dev, current.st_ino)
+                or row is None or not isinstance(row[0], bytes) or len(row[0]) > LEDGER_BYTES):
+            return False
+        state = _json(row[0])
+        if (type(state) is not dict or any(type(state.get(key)) is not dict
+                for key in ('tasks', 'threads', 'ops'))):
+            return False
+        task = state['tasks'].get(task_id)
+        operation = state['ops'].get(arguments.get('request_key'))
+        if (type(task) is not dict or type(operation) is not dict
+                or task.get('id') != task_id or task.get('thread_id') != thread_id
+                or type(state['threads'].get(thread_id)) is not dict
+                or task.get('state') != 'BLOCKED' or task.get('execution_started') is not False
+                or any(task.get(key) is not None for key in
+                       ('remote_turn', 'deadline', 'pending_turn', 'pending_approval_turn'))
+                or state['threads'][thread_id].get('active_task') == task_id
+                or operation.get('kind') != 'input' or operation.get('status') != 'SUCCEEDED'):
+            return False
+        intent = [thread_id, arguments['prompt'], arguments.get('model'), tool == 'codex_task_submit']
+        if arguments.get('reasoning_effort') is not None:
+            intent.append({'reasoning_effort': arguments['reasoning_effort']})
+        context, recorded = operation.get('context'), operation.get('result')
+        keys = ('requested_reasoning_effort', 'reasoning_effort', 'reasoning_effort_source',
+                'selection_catalog_sha256')
+        selection = task.get('selection_sha256')
+        if (operation.get('fingerprint') != digest(['input', intent])
+                or type(context) is not dict or context.get('task_id') != task_id
+                or type(recorded) is not dict or recorded.get('state') not in ('STORED', 'QUEUED')
+                or not isinstance(selection, str) or re.fullmatch('[a-f0-9]{64}', selection) is None
+                or context.get('selection_sha256') != selection or any(key not in task for key in keys)
+                or digest([task['model'], {key: task[key] for key in keys}]) != selection
+                or any(recorded.get(key) != task.get(key) for key in
+                       ('id', 'thread_id', 'model', 'prompt_sha256', 'selection_sha256', *keys))):
+            return False
+        if any(op.get('kind') == 'dispatch' and op.get('context', {}).get('task_id') == task_id
+               for op in state['ops'].values() if isinstance(op, dict)):
+            return False
+        projection = {key: value for key, value in task.items() if key not in
+                      ('prompt', 'remote_turn', 'stop_sent', 'pending_turn', 'pending_approval_turn')}
+        return result == projection
 
     def source_task_exists(self, task_id):
         """Read-only existence check used alongside the per-principal task ACL."""

@@ -209,7 +209,7 @@ class MechanicalHandoffTests(unittest.TestCase):
         return {'schema': 1, 'source': 'codex_app.read_thread',
                 'agent_path': self.state()['bindings']['a']['agent_id'],
                 'child_thread_id': '00000000-0000-4000-8000-000000000001',
-                'state': 'COMPLETED', 'answer': 'canonical "answer" with 日本語',
+                'state': 'COMPLETED', 'answer': 'canonical "answer" with \u65e5\u672c\u8a9e',
                 'provider_started_at': 1000, 'provider_completed_at': 1001,
                 'provider_duration_ms': 1000, 'poll_started_at': 1001, 'poll_finished_at': 1002,
                 'deadline_at': next(iter(call['deadlines'].values()))}
@@ -288,7 +288,7 @@ class MechanicalHandoffTests(unittest.TestCase):
         project = self.base.project
         (project / 'config').mkdir()
         (project / 'policies').mkdir()
-        body = '# AI開発オーケストレーション統合指示 v1.0\n\nFixture read-only policy.\n'
+        body = '# AI\u958b\u767a\u30aa\u30fc\u30b1\u30b9\u30c8\u30ec\u30fc\u30b7\u30e7\u30f3\u7d71\u5408\u6307\u793a v1.0\n\nFixture read-only policy.\n'
         digest = hashlib.sha256(body.encode()).hexdigest()
         (project / 'policies.md').write_text(body)
         (project / 'policies/manifest.json').write_text(json.dumps({

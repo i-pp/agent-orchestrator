@@ -56,7 +56,7 @@ class UpstreamTests(unittest.TestCase):
         context=developer_instructions(loaded,'Keep reviewer independence.')
         for text in self.docs.values():self.assertEqual(context.count(text),1)
         self.assertNotIn(self.legacy.text,context);self.assertFalse((self.root/'.runtime').exists())
-        for guard in ['ユーザーの明示的制約が優先','既存の安全ガード','追加隔離禁止','権限や承認を追加しない']:
+        for guard in ['explicit constraints take precedence','existing safety guards','no-nested-isolation restriction','grants no additional permissions or approval']:
             self.assertIn(guard,context)
 
     def test_missing_local_path_fails_without_fetch_clone_or_cache_fallback(self):

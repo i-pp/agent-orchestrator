@@ -42,9 +42,11 @@ python3 -B tests/live_phase2_e3_2.py --execute
 
 ## Review-time validation
 
+This section records an earlier runner-documentation review, not acceptance of later runtime changes.
+
 ### Source and environment
 
-The initial runner checks used a GitHub API source snapshot at commit `2f4ae8d034087dd3e448c48e1a47d9b3950be75c`; the runtime blobs were confirmed unchanged at PR head `f89b2663dcd372e7fd911ca069c4cd104a41b870`. A later check materialized a disposable one-commit Git working tree from GitHub API tree, blob, and commit objects at the reviewed PR code head `f89b2663dcd372e7fd911ca069c4cd104a41b870`. All 167 blob hashes, 17 directory tree hashes, the root tree SHA, and commit SHA matched, and the working tree was clean. Subsequent commits changed documentation only; runtime/source files are unchanged. `git clone` remained unavailable because DNS could not resolve `github.com`, so this API-materialized checkout has no remote origin and is not origin-verified.
+The initial runner checks used a GitHub API source snapshot at commit `2f4ae8d034087dd3e448c48e1a47d9b3950be75c`; the runtime blobs were confirmed unchanged at PR head `f89b2663dcd372e7fd911ca069c4cd104a41b870`. A later check materialized a disposable one-commit Git working tree from GitHub API tree, blob, and commit objects at the reviewed PR code head `f89b2663dcd372e7fd911ca069c4cd104a41b870`. All 167 blob hashes, 17 directory tree hashes, the root tree SHA, and commit SHA matched, and the working tree was clean. At that documentation-review checkpoint, subsequent commits changed documentation only; the statement does not apply to later runtime changes. `git clone` remained unavailable because DNS could not resolve `github.com`, so this API-materialized checkout has no remote origin and is not origin-verified.
 
 The host was Ubuntu 26.04.1 LTS, x86_64, Python 3.14.4. Checks used a temporary HOME and a fresh runtime under `.runtime/docs-howto`; no existing Codex auth file was exposed.
 
@@ -74,3 +76,59 @@ PYTHONPATH=tests python3 -B -m unittest test_common_policy test_common_policy_ac
 All 57 tests passed in the selected executor. They cover exact source hashes, required editorial documents, changed/missing Git objects, immutable context revalidation, full text delivered once to fresh and resumed threads, missing editorial pins preventing dispatch through the real loader, and old recorded policy versions preventing resume before peer launch. Historical owner metadata remains unchanged.
 
 The protocol checks use `tests/fake_codex.py`, a test-owned runtime, and a version-probe stub. They do not invoke a live Codex model or create nested isolation. This evidence does not establish model compliance, article acceptance, publication readiness, or deployment. The live daemon, AceIS notification worktree, and existing task databases were not used for these checks.
+
+## Initial English and native-team reconciliation (2026-11-13)
+
+The source integration pins accepted `ai-orchestration` commit `346f337c5dcdd1249adadcd1e31123ca02702418`, deliberately adopted after the canonical-link and review-completion corrections in [AI Orchestration PR #9](https://github.com/i-pp/ai-orchestration/pull/9). All five canonical GitHub file contents and Git blob hashes were checked against the adopted manifest. The assembled SHA-256 is `37aaf0e725713aa6d762d08ffe27c32d3aad0b14ddde9f4ee5303f20fa74a7ed`. A clean, explicitly selected content-equivalent local Git carrier passed the real loader with `working_tree_body_used=false` and `automatic_network=false`; it was not represented as a canonical-origin checkout. No existing operator checkout, service, or saved execution was rebound.
+
+The initial focused offline checks passed. They exercised [recovered pipeline contracts](branch-reconciliation.md), native role/model handoff and leases, policy loading/transitions, approval fixtures, mailbox boundaries, loopback HTTP fixtures, and the fixed JavaScript capture/helpers. See [PR #16 checks](https://github.com/i-pp/agent-orchestrator/pull/16/checks) for the checked revisions and outcomes. These are offline/simulated/local-fixture results, not live model or deployed-service acceptance.
+
+The two focused agent/pipeline groups are reproducible without starting a model:
+
+```bash
+PYTHONPATH=tests python3 -B -m unittest \
+  test_native_agent_profiles test_native_team test_native_dispatcher \
+  test_native_parent_adapter test_native_handoff test_git_audit test_source_ascii -v
+
+PYTHONPATH=tests python3 -B -m unittest \
+  test_codex_app_protocol test_codex_pipeline test_codex_pipeline_gateway \
+  test_codex_blocked_ownership test_codex_lifecycle test_pipeline_capacity test_pipeline_memory_budget \
+  test_pipeline_policy_migration -v
+
+node --test tests/native_thread_capture.cjs
+python3 -B scripts/check_source_ascii.py
+python3 -B scripts/git_audit.py
+```
+
+The source gates inspect exact Git-index blobs, not unstaged replacements. ASCII validation covers code/configuration extensions, permits escaped Unicode fixture data, and excludes Markdown/historical originals. The package audit preserves secret, operator-local path, mode, conflict, binary, and size checks. Its additional public-source exceptions are exact reviewed filenames, not blanket `.codex`, `.github`, or integration-directory exemptions. The reviewed index passed both gates without audit findings.
+
+All changed Markdown passed markdownlint-cli2 and repository-local link checks. Twenty-one non-native Japanese source snapshots are byte-identical; the four native snapshots preserve content/values with the documented notice and table formatting. The legacy policy, its manifest, and all nine original phase reports remain byte-identical. See [language/history boundaries](language-and-history.md) for exact snapshot-only lint exceptions.
+
+No whole-suite host acceptance, namespace/OS-isolation validation, live Codex generation, provider availability, billing class, service restart, public endpoint, or deployment is claimed. Some historical whole-suite tests require systemd, an installed Tunnel client, or namespace tools; do not run them blindly in an already isolated execution environment. Remaining optional pipeline and failed isolation work stays explicit in the [reconciliation ledger](branch-reconciliation.md).
+
+## Model and concurrency controls (2026-11-13)
+
+The later source revision adds [provider-discovered model and reasoning-effort selection](codex-model-selection.md), bounded catalogue paging, immutable task selection and explicit `turn/start.effort`. It also makes the [native new-run worker budget](native-agent-team.md#selecting-new-run-concurrency) configurable with `max` as its default within the six-child profile ceiling. These are separate transports and limits, not one combined pool. The two earlier PR review findings are corrected: the basic-run guide links the adopted policy manifest, and the exact-index ASCII guard now includes systemd/configuration examples without rewriting historical Markdown.
+
+Run this explicitly bounded offline union instead of historical whole-suite discovery:
+
+```bash
+PYTHONPATH=tests python3 -B -m unittest \
+  test_approval_portal test_chat_mailbox test_codex_app_protocol test_codex_approval_bridge \
+  test_codex_approval_trial_plan test_codex_lifecycle test_codex_pipeline test_codex_pipeline_gateway \
+  test_codex_blocked_ownership test_codex_schema_compatibility test_common_policy test_common_policy_acceptance test_common_policy_migration \
+  test_git_audit test_local_llm_mcp test_mailbox_grants test_mcp_events_lifecycle \
+  test_mcp_http_transport test_native_agent_profiles test_native_dispatcher test_native_handoff \
+  test_native_parent_adapter test_native_team test_notification_outbox test_pipeline_capacity \
+  test_pipeline_foundation_isolated test_pipeline_memory_budget test_pipeline_policy_migration test_policy_runner \
+  test_sites_approval_provider test_source_ascii test_upstream_policy -v
+node --test tests/native_thread_capture.cjs
+python3 -B scripts/check_source_ascii.py
+python3 -B scripts/git_audit.py
+```
+
+The integrated offline checks passed. They cover the recovered pipeline contracts, provider/default/effort/idempotency cases, unsupported and legacy-input blockers, exact duplicated MCP wire-size checks, authenticated owner-page cursor/ownership/scan bounds, metadata ACLs, fixed notification reasons, and native configurable-admission/frozen-run behavior. See [PR #16 checks](https://github.com/i-pp/agent-orchestrator/pull/16/checks) for GitHub-visible results and the exact checked revision. These fixture results do not establish live app-server, model, deployment or host-isolation acceptance.
+
+A catalogue observation does not verify generation or billing. Missing/null provider effort echoes remain unverified; conflicting echoes block. Existing uncertain effects retain their leases, and old queued inputs without an immutable effort are not guessed or rewritten. No live services, policy checkout, credentials, saved execution or operator configuration were rebound. Ordinary daemon session capacity and LAF pool changes require their own matching source/configuration evidence.
+
+The blocked-input ownership regressions compose the real Pipeline, private Outbox, Events service and LocalPrincipal adapter, including pure HTTP and the existing daemon/proxy/gateway route with fake transport. They check owner recovery for definitively persisted pre-turn blockers, unchanged foreign/approval gates, bounded read-only proof and exact-key reconciliation. Real lost-acknowledgement fixtures remain unknown, unbound and non-replayed. No socket, service or real model is used; prearranging task ownership is not a substitute for testing the composed submission path.

@@ -19,6 +19,7 @@ from notification_outbox import (BLOCKED_REASON_CODES, EVENT_NAMES, Notification
 from codex_pipeline import Pipeline
 from codex_host import HostGateway
 from codex_app_protocol import RpcError
+from test_codex_app_protocol import MODEL
 
 
 OWNER = 'mcp-principal:test-user-1'
@@ -220,6 +221,29 @@ class NotificationOutboxTests(unittest.TestCase):
             self.assertEqual(self.status(result['event_id'], subscription)['status'], 'DELIVERED')
         self.assertCountEqual(delivered_reasons, reason_codes)
 
+    def test_reasoning_catalog_blockers_replay_exactly_once_without_private_metadata(self):
+        self.subscribe(event_name=EVENT_NAMES['task_blocked'][0])
+        reasons = {
+            'REASONING_EFFORT_NOT_SUPPORTED','LEGACY_REASONING_EFFORT_MISSING',
+            'IMMUTABLE_MODEL_SELECTION_CHANGED','MODEL_CATALOG_UNKNOWN',
+            'MODEL_CATALOG_INVALID','MODEL_CATALOG_BOUND','RESUME_REASONING_EFFORT_MISMATCH'}
+        events = [self.event('task_blocked',seq=n,reason_code=code,
+            prompt='private prompt',provider_description='private provider text')
+            for n,code in enumerate(sorted(reasons),1)]
+        self.append_events(*(events+events))
+        self.outbox.sync_from_ledger()
+        self.outbox.sync_from_ledger()
+        with closing(sqlite3.connect(self.outbox_db)) as conn:
+            rows = conn.execute('SELECT event_id,payload,status FROM notification_outbox').fetchall()
+        self.assertEqual(len(rows),len(reasons))
+        self.assertEqual(len({row[0] for row in rows}),len(reasons))
+        self.assertTrue(all(row[2]=='PENDING' for row in rows))
+        payloads = [json.loads(row[1]) for row in rows]
+        self.assertEqual({row['data']['reason_code'] for row in payloads},reasons)
+        for payload in payloads:
+            self.assertEqual(set(payload['data']),{'task_id','thread_id','state','action_required','reason_code'})
+            self.assertNotIn('private',json.dumps(payload))
+
     def test_blocked_task_rejects_unknown_reason_without_advancing_cursor(self):
         subscription = self.subscribe(event_name=EVENT_NAMES['task_blocked'][0])
         self.append_events(self.event('task_blocked', reason_code='UNREVIEWED_PRIVATE_REASON',
@@ -234,7 +258,7 @@ class NotificationOutboxTests(unittest.TestCase):
                                   (subscription,)).fetchone()[0]
         self.assertEqual(queued, 0)
         self.assertEqual(cursor, 0)
-        self.assertEqual(len(BLOCKED_REASON_CODES), 5)
+        self.assertEqual(len(BLOCKED_REASON_CODES), 12)
 
     def test_daemon_restart_recovers_expired_delivery_lease_and_reuses_event_id(self):
         sub_id = self.subscribe()
@@ -487,6 +511,8 @@ class PipelineNotificationIntegrationTests(unittest.TestCase):
                 'native_context_state': 'READY'}
             state['tasks'][TASK_A] = {
                 'id': TASK_A, 'thread_id': THREAD_A, 'model': 'offline-model',
+                **Pipeline._selection('offline-model', 'medium'),
+                'reasoning_effort_evidence': {'turn_transport':'not_sent'},
                 'prompt': 'private synthetic prompt', 'prompt_sha256': 'f' * 64,
                 'state': 'QUEUED', 'remote_turn': None, 'deadline': None, 'answer': None,
                 'answer_truncated': False, 'stop_sent': False, 'queue_seq': 0,
@@ -525,7 +551,7 @@ class PipelineNotificationIntegrationTests(unittest.TestCase):
                 if method == 'account/read':
                     return {'account': {'type': 'chatgpt'}}
                 if method == 'model/list':
-                    return {'data': [{'model': 'offline-model', 'hidden': False}], 'nextCursor': None}
+                    return {'data': [MODEL], 'nextCursor': None}
                 if method == 'turn/start':
                     raise RpcError(-32000, 'private server rejection detail')
                 raise AssertionError('unexpected synthetic app-server request: ' + method)

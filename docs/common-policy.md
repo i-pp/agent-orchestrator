@@ -1,27 +1,30 @@
-# 共通正本の固定版ロード
+# Loading the Pinned Common Policy
 
-共通正本は[i-pp/ai-orchestration](https://github.com/i-pp/ai-orchestration)。このrepoは実行・監視・タスク管理と、正本を読む仕組みを所有する。正本repoへ編集・pull/reset・自動同期を行わず、本文をこちらで複製管理しない。
+The source of truth is [i-pp/ai-orchestration](https://github.com/i-pp/ai-orchestration). This repository owns runtime execution, monitoring, task management, and the verified loader. It does not maintain a second copy of the current canonical policy bodies or automatically edit, pull, reset, or synchronize their checkout.
 
-## 採用版と取得元
+## Adopted source and hashes
 
-- GitHub採用commit: `394bf5377c2b82bb6f660ca917192bdbe337bc85`
-- version: `git:394bf5377c2b82bb6f660ca917192bdbe337bc85`（bundle全体はcommitで識別し、編集正本の文書版は2.0）
-- 本文集合のSHA-256: `e8a458430fb66791300c942d6eb49e967a184989b858ec597b7c0b22541cf0ce`
-- 正本5文書: docs/ai/orchestration.md、docs/ai/policies.md、agents/README.md、docs/ai/editorial-policy.md、policies/editorial.md
+`config/upstream-policy.json` records the adopted canonical commit, `git:<commit>` bundle version, aggregate SHA-256, and SHA-256/Git blob SHA for each of five documents:
 
-`config/upstream-policy.json`が取得元・commit・文書ごとのSHA-256/Git blob SHAを固定し、`config/policy.json`が新正本の採用を必須化する。実行時にbranchの最新版を追わず、ネットワーク・fetch・clone・copyを追加しない。指定したローカルGit objectから全文を読み、各hashと本文集合hashを検証する。
+- `docs/ai/orchestration.md`
+- `docs/ai/policies.md`
+- `agents/README.md`
+- `docs/ai/editorial-policy.md`
+- `policies/editorial.md`
 
-共通の版を変更するときは正本側での変更・commitを確認し、pinを意図的に更新して試験する。hashエラーを消すためだけの自動再hashや、不達時の旧版fallbackはしない。下記ローカル設定を作っても、中央のhash pinは解除されない。
+`config/policy.json` requires this upstream pin. Editorial Policy's document version is 2.0; it is not the version of the entire Git-pinned bundle. Inspect the actual configuration and verified metadata rather than assuming the latest branch head is accepted.
 
-## ローカルcloneのpathとdirty
+The loader reads complete immutable local Git objects, checks every document hash and the assembled bundle hash, and does not fetch, clone, copy, or follow a remote branch automatically. To change adoption, first review and identify the accepted canonical commit, deliberately update all pin metadata, and run regressions. Never rehash arbitrary content just to silence an error or fall back to an older policy when the selected source is unavailable.
 
-portableな既定は`../ai-orchestration`で、**agent-orchestratorのproject root基準**。`~`は実行ユーザーのhomeへ展開し、環境変数の暗黙展開はしない。絶対pathもoperatorのローカル設定で指定できる。実在を検査し、symlinkやcheckoutのsubdirectoryは拒否する。
+## Existing checkout selection
 
-通常は正本と一致するoriginと、採用commitのGit objectを持つ既存cloneを使う。ローカルの配置例は存在を仮定しない。まずremote・HEAD・dirtyを読み取って確かめる。ユーザーの未commit変更をreset/pullで上書きしたり、別cloneを自動作成したりしない。
+The portable default `../ai-orchestration` is relative to the **runtime project root**. `~` expands to the executing user's home; environment variables are not implicitly expanded. An operator-local selector can use an absolute path. The loader checks existence and rejects symlinks and checkout subdirectories.
 
-既存の並行作業repoにoriginやGitHub commit objectがなくても、**operatorがローカルcommitを明示し、固定5文書の全bytesがGitHub pinと一致する場合だけ**、内容が等価なcarrierとして参照できる。originが確認できたと表示せず、canonical commit・実際の読込commit・HEAD・dirty・origin_verified=falseを別々に記録する。別repoの内容を信用してpinを更新する機能ではない。
+Normally use an existing checkout with canonical origin and the pinned commit object. Verify its remote, HEAD, and dirty status; a path example is not proof that a checkout exists. Do not overwrite uncommitted work with pull/reset or create another clone automatically.
 
-`config/policy-source.local.json`はGit除外する。必要なら[設定例](../examples/policy-source-checkout.example.json)を参考に、実在するpathと40桁commitを明示する。これは配置設定でありcredentialを含めない。
+An originless checkout or personal fork can be a content carrier only when the operator explicitly supplies its local commit and all five document byte sequences match the canonical pin. It is not treated as origin-verified. Canonical commit, actual loaded local commit, HEAD, dirty state, and origin proof are recorded separately. This does not permit trusting another repository's text or changing the canonical hashes to match it.
+
+The optional `config/policy-source.local.json` is Git-ignored and contains no credentials. Use the [example](../examples/policy-source-checkout.example.json) with an existing path and full 40-hex commit:
 
 ```json
 {
@@ -31,49 +34,42 @@ portableな既定は`../ai-orchestration`で、**agent-orchestratorのproject ro
 }
 ```
 
-読込metadataにはcheckout、loaded_checkout_commit、checkout_head_before/after、checkout_dirty、checkout_origin_verified、local_commit_overrideが入る。本文は常に選択commitのGit objectであり、dirtyなworking tree本文は読まない。HEADが進んでもpinを自動採用しない。古いcommit objectがなくなれば読込み失敗になる。
+The selector never disables hash validation. Metadata includes `checkout`, `loaded_checkout_commit`, `checkout_head_before/after`, `checkout_dirty`, `checkout_origin_verified`, and `local_commit_override`. The body always comes from the selected commit's Git objects, not dirty working-tree text. Advancing HEAD does not adopt a new policy; losing the required object causes a load failure.
 
-## 読込みと優先順位
+## Inspection, delivery, and precedence
 
 ```bash
 python3 -B scripts/policy_context.py --format inspect
-python3 -B scripts/policy_context.py --format packet --target dot --task '目的と完了条件'
+python3 -B scripts/policy_context.py --format packet --target dot \
+  --task 'Inspect the assigned outcome and acceptance criteria.'
 ```
 
-`common_policy.load_project_policy`→固定source設定→`upstream_policy`→既存local Git object→hash検証→immutable bundleの順。本文はdeveloperInstructionsへ各文書1回だけ入れ、metadataをexecution ownerへ記録する。Runnerのthread/startとthread/resume、repo AGENTS/4role/Skillの読込み経路は同じCLI/loaderを使う。resume元のversion/hashが違うとモデル開始前に拒否する。
+The path is `common_policy.load_project_policy` -> fixed source configuration -> `upstream_policy` -> existing local Git objects -> hash validation -> immutable bundle. Each document appears once in developer instructions, with metadata saved to the execution owner. Runner fresh/resumed threads, repository instructions, native profiles, and the common-policy skill use this same loader. A recorded version/hash mismatch blocks resume before starting a model.
 
-優先順位は、実行環境の上位規則・権限・ユーザーの明示的制約・既存安全ガードが先、その範囲で固定共通正本、project/roleの具体化、task。正本は権限や承認を追加せず、追加隔離禁止、公開scope、認証、費用制限、既存のJSON/schemaやsandbox検査を上書きしない。モデルの遵守をこの仕組みだけで保証しない。
+Higher-priority execution rules, permissions, explicit user constraints, and existing safety guards take precedence. Within those boundaries, apply the pinned canonical policy, project/role details, and task scope. The policy does not grant approval, override no-nested-isolation requirements, widen publication/authentication/cost scope, or weaken schema/sandbox checks. Body delivery is not proof that a model followed it.
 
-不達、commit/版/hash不一致、壊れたsource設定、symlink等はPolicyErrorとなり、policy依存のdispatchをモデル開始前に止める。診断用の読み取りや独立した安全な編集まで止める意味ではない。直接の上位指示はこの正本より優先する。packet組立ては自動配送や、親dotからの直接呼出し成功の証明ではない。
+Unavailable sources, bad configuration, commit/version/hash mismatch, or rejected paths raise `PolicyError` and block affected model dispatch. Diagnostic reads and independent safe work can continue. Constructing a packet is not automatic delivery or evidence of a successful direct parent-Dot invocation.
 
-## Editorial Policy v2.0の適用と切替
+## Editorial v2 and intentional transitions
 
-共通統治の3文書に、技術記事の編集正本 `docs/ai/editorial-policy.md` と運用補足 `policies/editorial.md` を加えた。5文書すべてを同一の採用commitから取得し、文書別hashと本文集合hashを検証する。v2.0は編集正本の文書版であり、旧root `policies.md` v1.0をv2へ書き換えたという意味ではない。
+The three governance documents are combined with the authoritative Editorial Policy v2 and its supplement at one accepted commit. All five documents and their aggregate are verified. The legacy root `policies.md` v1.0 remains a separate immutable historical record, not a second current injected body.
 
-技術記事の作成・編集・引継ぎでは、Reader First、事実と証拠の保持、技術レビューと編集レビューの分離、受理済みBの凍結後にAを作る境界を適用する。一般の実装タスクの出力形式は記事形式へ変えない。独立したFace Cへ共有ポリシーやSkillを渡さず、連絡・公開・mergeの権限を追加しない。
+Apply reader value, evidence integrity, independent technical/editorial review, and accepted-B freeze before creating A when technical articles are in scope. Do not force article structure onto ordinary implementation results. Face C remains independent: do not send it shared policy/skills, manufacture its persona, or infer contact/publication/merge authority.
 
-このruntimeが注入するのは固定した5文書の全文だけである。参照先の記事用Skill・例文・`load_policy.py --show`は正本checkout側のパスであり、runnerの作業ディレクトリに導入されたとは扱わない。記事作業で必要なら、権限内で固定commitの参照資料を別途読み、その版とhashを記録する。本文注入・CLI packet・模擬peerの成功だけでは記事の品質、モデルの遵守、記事の受理や公開を保証しない。
+Only the pinned five bodies are injected. Referenced writing skills, examples, and `load_policy.py --show` live in the canonical checkout; injection does not install them into a runner workspace. Read any needed references separately at a permitted fixed revision and record their identity. Packet/fixture success does not establish article quality, model compliance, acceptance, or publication readiness.
 
-既存の `config/policy-source.local.json` で `checkout_commit` を明示している場合も、新pinと5文書の全bytesが一致するcommitをoperatorが選び直す。古い3文書だけの設定や欠落・hash不一致はfallbackせず停止する。前回のversion/hashが記録済みで異なるresumeもモデル開始前に拒否する。旧owner metadataや凍結済み原稿のpolicy bindingを更新せず、新しくレビューしたタスクとして開始する。既存のpolicy metadataがないresumeの扱いは従来どおり `legacy-unpinned` として記録する。
+When adopting a new pin, an existing explicit local selector must point at a commit whose five complete documents match it. An old three-document selector, missing file, or hash mismatch fails closed. A resumed execution with different recorded policy identity also fails before a new model call. Preserve old owner metadata and frozen manuscript bindings; use a deliberately reviewed new task rather than rebinding history. A resume without older policy metadata retains the existing `legacy-unpinned` classification.
 
-この変更の採用はコードのreview/mergeと対象環境への配備を経て行う。稼働中のdaemon、AceIS通知開発、既存タスク、認証やglobal configをこの文書の更新だけで切り替えない。
+A source merge and a rollout to an execution environment are different steps. Do not switch an existing daemon, notification worktree, task database, authentication, or global configuration merely because this document or the source pin changed.
 
-## 旧v1.0との差分と扱い
+## Legacy record
 
-旧`policies.md`は利用者原文v1.0（SHA-256 `8fede5f946fd944485e7095ea27cb4923fb97ebf466d1e4b355ad21a50a00286`）を変更せず、manifestとともに履歴として残す。採用設定は旧hashも検査するが、現在の共通本文として二重注入しない。二つの正本を並行改訂しない。
+The user-authored `policies.md` v1.0 retains SHA-256 `8fede5f946fd944485e7095ea27cb4923fb97ebf466d1e4b355ad21a50a00286` and its manifest unchanged. Adoption validates that historical reference but does not inject it alongside the current upstream body. Do not translate those pinned bytes in place or maintain two evolving policy sources.
 
-意味のある差は次のとおり。
+The canonical source separates governance from runtime, uses Routine/Controlled/High impact risk classes rather than the old S0-S3 scheme, and states that role/delegation never grants authority. Detailed numeric DAG/concurrency/retry limits live in current project configuration; historical values are not silently removed or treated as new completed enforcement. Current native limits are documented in the [native team guide](native-agent-team.md). Actual authorization already granted is not requested again unless scope or risk changes.
 
-| 差 | 今回の扱い |
-| --- | --- |
-| 共通統治とruntime実装の管理repoを明確に分離 | 共通本文は正本へ集約し、こちらは読込と実行検証を所有 |
-| 旧S0〜S3に対し新正本はRoutine/Controlled/High impactの3区分 | publication/production/credential/privacy/費用等の重大影響は具体的なユーザー承認が必要。既に得た承認を再要求しない |
-| ChatGPT/Dot/各Agentの役割は追加権限を与えないと明示 | 設計回答や委譲を承認と混同しない |
-| 旧版のDAG/最大2並列/再試行上限/決議status/評価指標等の詳細は新正本に数値定義なし | 既存project設定・ガード・運用制約を維持し、上限を外さない。今回それらを新たに完成したと主張しない |
-| 新版は数値versionがなく内容も要約された別文書集合 | v2等を捏造せずcommitと各hashで固定 |
+## Verification boundary
 
-## 検証範囲
+Inspect the actual pinned five documents and metadata in an existing checkout. Offline Git fixtures cover unavailable objects, tampering, dirty-state preservation, different HEAD, explicitly equivalent local commits, version mismatch, path resolution, section boundaries, and immutable context revalidation.
 
-実local checkoutの固定5文書を読込み、採用commit/hashとローカルcommit/dirtyを確認する。fixture Git repoでは正常・不達・dirty保全・異なるHEAD・等価ローカルcommit・改ざん・版不一致・path解決を検査する。文書別hashとsection境界はcontext組立て時にも再検査する。
-
-Runner→模擬App Server peerでは実際のdeveloperInstructions・owner metadata・失敗前停止・resumeを検査する。実モデルへの新しい推論や、すべての環境での自動遵守を確認したとは扱わない。中央repoを編集する試験、namespace追加作成、認証変更は行わない。
+Runner/simulated App Server checks inspect delivered developer instructions, owner metadata, fail-before-dispatch behavior, and resume. They do not establish a fresh live inference, automatic compliance in every environment, or deployment. These checks do not modify the canonical checkout, create nested isolation, or change authentication.

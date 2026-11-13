@@ -2,5 +2,58 @@
   "config": {
     "default": true,
     "MD013": false
-  }
+  },
+  // Exact historical-source formatting exceptions; see docs/language-and-history.md.
+  // English primary documents and all other rules remain fully linted.
+  "overrides": [
+    {
+      "filter": [
+        "docs/git-tracking_jp.md",
+        "docs/login-autorecovery_jp.md",
+        "docs/mailbox-grants_jp.md",
+        "docs/mailbox-operations_jp.md",
+        "docs/path-conventions_jp.md"
+      ],
+      "config": {
+        "MD060": false
+      },
+      "combine": "merge"
+    },
+    {
+      "filter": [
+        "docs/poc-services_jp.md"
+      ],
+      "config": {
+        "MD012": false
+      },
+      "combine": "merge"
+    },
+    {
+      "filter": [
+        "docs/resource-limits_jp.md"
+      ],
+      "config": {
+        "MD034": false
+      },
+      "combine": "merge"
+    },
+    {
+      "filter": [
+        "docs/retention-policy_jp.md"
+      ],
+      "config": {
+        "MD033": false
+      },
+      "combine": "merge"
+    },
+    {
+      "filter": [
+        "docs/systemd-deployment_jp.md"
+      ],
+      "config": {
+        "MD029": false
+      },
+      "combine": "merge"
+    }
+  ]
 }

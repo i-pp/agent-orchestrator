@@ -38,6 +38,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Require ASCII source and configuration blobs
+        run: python3 -B scripts/check_source_ascii.py
+      - name: Audit exact public-source paths and staged blobs
+        run: python3 -B scripts/git_audit.py
       - name: Validate tracked Python and JSON sources
         run: |
           python3 -B - <<'PY'

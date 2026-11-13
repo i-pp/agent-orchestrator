@@ -1,115 +1,71 @@
-# 障害復旧・照合設計
+# Recovery and Reconciliation
 
-「何が起きたかの確認」と「次の処理の実行」を分離し、UNKNOWNを勝手に実行しないことを優先する。
+Determine what happened before deciding what to execute next. Never treat `UNKNOWN` as permission to rerun. The [Japanese historical source](recovery-design_jp.md) retains the original phase evidence.
 
-## IDと記録
+## Identity and durable records
 
-| ID | 意味 |
+| ID | Meaning |
 | --- | --- |
-| task_id | 目的、プロンプト、受入条件 |
-| execution_id | 一度取得した実行。task_idとは別UUID |
-| thread_id/session_id | Codex保存会話。従来のtask.session_idも保持 |
-| turn_id | 会話内の1回の生成 |
-| reconciliation_id | 特定時点の照合根拠 |
-| decision_id | actorと理由付きの判断 |
+| `task_id` | Objective, prompt, acceptance criteria |
+| `execution_id` | One claimed execution; a distinct UUID |
+| `thread_id` / `session_id` | Saved Codex conversation; legacy task session ID remains |
+| `turn_id` | One generation in that conversation |
+| `reconciliation_id` | Evidence gathered at a particular point |
+| `decision_id` | Decision with actor and reason |
 
-executions.task_idは一意で、同じtaskへの二度目の実行をDBでも拒否する。
-再開は新しいtask/executionで行い、元の実行を復元・反復しない。clientUserMessageIdにもexecution_idを指定する。
+Unique `executions.task_id` rejects a second execution of the same task. Resume uses a new task/execution rather than restoring/repeating the original; `clientUserMessageId` also uses the execution ID.
 
-Phase 2-A/Bのschemaはv2。現在はPRAGMA user_version=3で、workspace/role/access/snapshotを追加する。
-追加のlease・v2移行・rollbackは[並列設計](concurrency-design.md)を参照。
+Phase 2-A/B used schema v2; v3 adds workspace/role/access/snapshot. See [concurrency](concurrency-design.md) for additive migration and leases. Records separate tasks/acceptance/status/resume approval; execution owner/processes/launch intent/thread/turn/result/manifest/cleanup; transitions; reconciliations; verification fingerprints; and decisions. Legacy `COMPLETED` rows remain historical `LEGACY_UNVERIFIED`, with `completion_verified=false`, not newly verified success.
 
-- tasks: 旧17列を保持し、acceptance、active_execution_id、codex_status、verification_status、human_status、resume_approvalを追加。
-- executions: ownerのboot/PID/start、processes、launch_pending、送信意図、thread/turn、Codex結果、実行前manifest、cleanup、時刻。
-- transitions: 状態変更、理由、execution_id。
-- reconciliations: 照合facts。
-- verifications: 判定・根拠・workspace fingerprint。
-- decisions: 判断種別、actor、理由、参照した照合。
+## Startup, abnormal exit, and cleanup
 
-旧COMPLETEDは履歴を改変せず保持し、LEGACY_UNVERIFIEDとする。completion_verifiedはfalseであり、新しい検証済み成功に数えない。
+A runner never recovers another live owner while its lease is held. After acquiring appropriate leases, it marks abandoned `RUNNING`/`VERIFYING` as `UNKNOWN` without resubmitting. Preserve a verified checkpoint's saved Codex success; only in-flight execution status becomes unknown.
 
-## 起動・異常停止・解放
+Save `launch_pending` before spawn and PID/start afterward. A gap is not proof of release. Boot ID plus PID/start distinguishes PID reuse. Old cleanup does not prove release if a later verifier is alive. Parent-death guards, process groups, kill-child, and PID namespaces support bounded cleanup. Timeout/cancel first sends `turn/interrupt`; unconfirmed checkpoints or surviving owned processes leave `UNKNOWN`. Cleanup does not roll back side effects.
 
-ロックを取得できない間はライブownerの実行を復旧しない。取得した新しいrunnerは残ったRUNNING/VERIFYINGをUNKNOWNへ移すだけで、自動投入しない。
-VERIFYINGで保存済みのcodex_status=SUCCEEDEDは保持する。送信中・実行中だけをUNKNOWNへ変更する。
+## Reconciliation, not generation
 
-起動直前にlaunch_pending、起動後にPID/startを保存する。起動と記録の隙間は「解放済み」と推測しない。
-boot IDとPID/startで再利用PIDを区別する。古いcleanupがあっても、その後の検証プロセスが生きていれば解放済みではない。
-parent-death guard、プロセスグループ、unshare kill-child、PID namespaceを使う。
-中断・期限ではまずturn/interruptを送り、上限付きで解放する。稼働中残存や未確認checkpointがあればUNKNOWN。
-これらは副作用の巻戻しではない。
+`recover` records uncertainty. `reconcile` saves:
 
-## 照合
+- Owned PID/start/boot and live descendants.
+- Current regular-file manifest and differences from the pre-execution manifest.
+- Complete runner JSONL records, corruption, and truncated tails.
+- Target/latest turns and session state from official `thread/read` and `thread/turns/list` over dedicated stdio.
 
-recoverは不確実性の記録だけ。reconcileは次をreconciliation_idに保存する。
+It never calls `thread/resume` or `turn/start`, nor directly edits/reads Codex internal databases. History is bounded to ten pages of twenty turns; missing evidence is not guessed. The phase checked the [App Server API](https://learn.chatgpt.com/docs/app-server) against installed generated schemas.
 
-- 所有PID/start/bootと稼働中残存。
-- workspaceの通常ファイルmanifestと実行前との差。
-- ランナーJSONLの完全行、破損、末尾切断。
-- 専用stdioから公式thread/read、thread/turns/listで得た対象turn・最新turn・セッション状態。
+Manifests store regular-file sizes/SHA-256, not contents. Limits are 1,000 regular files, 16 MiB each, about 64 MiB total, and 1,000 directories. Exceeded limits, symlinks, or unreadable files make reconciliation uncertain. `UNCHANGED` means only manifest equality, not absence of external, network, or temporary effects.
 
-照合でthread/resumeやturn/startは呼ばない。Codex内部DB・履歴を直接読書きしない。
-履歴は最大10ページ・各20turn。見つからないものを推測で補わない。
-APIは[公式App Server](https://learn.chatgpt.com/docs/app-server)とインストール済みバイナリの生成schemaを照合した。
+## Explicit decisions
 
-manifestは通常ファイルのサイズとSHA-256だけ。内容は保存しない。
-上限は通常ファイル1,000件・各16 MiB・合計約64 MiB・ディレクトリ1,000件。上限、symlink、読取不能は不明扱い。
-UNCHANGEDはこのmanifestの一致のみで、外部・一時的・ネットワーク等の副作用がなかった証明ではない。
-
-## 明示判断
-
-| 操作 | 条件・効果 |
+| Operation | Preconditions and effect |
 | --- | --- |
-| resolve verify | UNKNOWN/判断待ちの保存turnに正常結果があり、解放確認済み。Codex生成なしで受入検証する |
-| resolve fail | UNKNOWN/判断待ちを理由付きで失敗として閉じる |
-| resolve allow_resume | 終了済み・最新turn一致・解放確認済み。変更や不明な副作用には明示ackが必要。投入しない |
-| submit --resume-of | 明示的な新規投入。UNKNOWN/判断待ちは許可decision_idが必須 |
-| run | 新しいtaskを一度だけ実行し、resume直前にも照合する |
+| `resolve verify` | Saved normal turn for unknown/human-waiting work, confirmed cleanup; verify acceptance without a generation |
+| `resolve fail` | Close unknown/human-waiting work as failed with a reason |
+| `resolve allow_resume` | Terminal execution, latest matching turn, confirmed cleanup; explicitly acknowledge changed/unknown effects; do not submit |
+| `submit --resume-of` | Explicit new task; unknown/human-waiting sources need an approval decision ID |
+| `run` | Execute the new task once; reconcile again immediately before resume |
 
-再開許可は一度だけ使用でき、workspace変更で失効する。履歴が進んでいれば再開を拒否する。
-会話resumeは最新会話への新入力であり、途中のコマンド復元ではない。
-旧データで記録が不足すれば不足を明示し、自動承認しない。
+Resume approval is single-use and invalidated by workspace changes. Advanced conversation history blocks reuse. Resume adds new input to the latest conversation; it does not restore an interrupted command. Missing legacy evidence must be reported, not automatically approved.
 
-## 移行とロールバック
+## Migration and rollback
 
-認識する旧schemaはPhase 1のtasks/transitions。独自index/trigger/viewや未認識版は推測で変更せず拒否する。
-排他取得後、SQLite backupでdb-backups/phase1-UUID.sqliteへ退避する。
-外部キー設定をトランザクション外で切替え、別表へコピー、旧表削除、名称変更、追加表作成を1トランザクションで行う。foreign_key_check後にcommitし、途中失敗はrollbackする。
-[SQLite公式のschema変更手順](https://www.sqlite.org/lang_altertable.html)、[Python sqlite3のbackup・トランザクション](https://docs.python.org/3.14/library/sqlite3.html)を参照した。
+Recognize the Phase-1 tasks/transitions schema, not unknown versions or custom indexes/triggers/views. Under exclusivity, back up through SQLite to `db-backups/phase1-UUID.sqlite`. Follow [SQLite schema-change guidance](https://www.sqlite.org/lang_altertable.html): adjust foreign-key handling outside the transaction, copy/rename/create tables transactionally, run `foreign_key_check`, then commit or roll back. See [Python sqlite3](https://docs.python.org/3.14/library/sqlite3.html).
+
+With all clients stopped and [variables](path-conventions.md) set:
 
 ```bash
-python3 src/runner.py --runtime .runtime/<対象runtime> db-rollback <phase1-backup-filename.sqlite>
+python3 src/runner.py --runtime "$STATE_DIR" db-rollback "$BACKUP_FILENAME"
 ```
 
-全クライアントを止めて実施する。コマンドは排他取得し、Phase 2の実行・照合・検証・判断がないことと、旧tasks列・transitionsがbackupに一致することを確認する。
-新規タスクを含む変更があれば拒否し、データを捨てて戻すオプションは用意しない。
-現DBも別退避し、SQLite backupで復元、integrity_checkを確認する。強制ファイル上書き・初期化はしない。
+Rollback acquires exclusivity and requires no newer execution/reconciliation/verification/decision data, plus equality of legacy task columns/transitions with the backup. New tasks or changes reject rollback; there is no discard-data option. Preserve the current DB separately, restore via SQLite backup, and run `integrity_check`, not a force overwrite/reset.
 
-復元後に新コードへ接続すれば再移行される。旧コードへ戻す場合は、退避したPhase 1ソースもレビューして復元する。
-今回のソース退避は.runtime/phase2-evidence/phase1-source-backup.tar.gz。作業ツリーへの自動展開はしない。
-実Phase 1データ12件のコピーと専用fixtureで、行・外部キー・復元を検証した。元DBは移行試験で変更していない。
+New code remigrates a restored DB. Reverting code requires review of corresponding archived source. The original A/B source archive was `.runtime/phase2-evidence/phase1-source-backup.tar.gz`; no automatic source extraction occurs. Historical migration tests used a copy of twelve Phase-1 rows and dedicated fixtures without altering the original DB.
 
-## 限界
+## Later workspace, scope, and scheduler records
 
-模擬server異常終了、親SIGKILL（RUNNING/VERIFYING）、JSON末尾切断、起動checkpoint、二重実行、移行途中失敗を試験する。
-実Codexでも親SIGKILL後のUNKNOWN、公式履歴、解放を確認した。
-OS再起動・停電、ディスク故障、実ネットワーク断、任意の外部副作用の復元は未検証。
+C selects the owned workspace through `task.workspace_id`; recovery must not affect independent work. Respect task/workspace leases and live workers. Resume probes join the current execution's process records and finish before an execution server opens. Released or invalid workspaces are refused for human investigation.
 
-## Phase 2-Cでの適用
+D1 adds owned receipts and cgroup absence/`populated=0` to cleanup evidence. Only UUID scopes under `resource-events` are considered, never arbitrary units, Codex DBs, or existing daemons. A leftover `READY` receipt is not normal completion. D2 also reconciles one-shot dispatch reservations and refuses old-DB restore that would discard durable queue state; see [scheduler](scheduler-design.md).
 
-照合・判断・再開検証はtask.workspace_idから所有workspaceを選択する。別workspaceの実行に復旧を波及させない。
-起動時は各task/workspace leaseを確認し、生きたworkerはそのまま、不在のRUNNING/VERIFYINGだけUNKNOWNへ移す。
-resumeの照合probeも現在executionのプロセス記録に含め、probe終了後に実行serverを開く。
-release済みや境界検証に失敗するworkspaceはアクセスを拒否し、人間の調査対象とする。
-
-## Phase 2-D1のscope照合
-
-execution.owner.resource_scopesに記録した自分のreceiptとcgroupの不在／populated=0も解放根拠へ加える。
-receiptはresource-events配下の正規UUID unitだけを対象とし、既存Codex DB・既存daemon・任意のunitを操作しない。
-親死亡時のREADYだけで正常終了を推測しない。UNKNOWNは自動再実行せず、証拠は保持する。
-
-## Phase 2-D2の永続dispatch
-
-起動時はworkerの一回限り予約も照合し、未取得QUEUEDと不明なdispatchを区別する。
-追加schemaがあるDBを古いbackupへ戻してキュー記録を捨てる操作は拒否する。
-詳細は[scheduler設計](scheduler-design.md)を参照。
+Historical tests covered fake-server death, parent SIGKILL during execution/verification, JSON truncation, launch gaps, duplicate execution, and migration failure. Real Codex evidence covered parent-loss `UNKNOWN`, official history, and cleanup. OS restart/power loss, disk failure, real network interruption, and recovery of arbitrary external side effects remain outside that evidence.

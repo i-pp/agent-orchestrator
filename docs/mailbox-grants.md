@@ -1,39 +1,41 @@
-# 期限と件数を限定した開発相談grant
+# Time- and Count-Bounded Development Grants
 
-固定slotの追加を繰り返す代わりに、一度承認したtask UUID内で要求を初回登録時にpinする。`--allow-mailbox-grants`は既定OFF、既存の`--allow-chat-mailbox`も必要。公開操作名・schemaは既存11操作と同じ。固定slotは従来のpolicy/DBで維持し、grantだけを別ledgerで扱う。task namespaceの衝突は起動前に拒否する。
+A grant pins requests on first registration inside one approved task UUID instead of adding fixed slots repeatedly. `--allow-mailbox-grants` defaults off and also requires `--allow-chat-mailbox`. The existing eleven-operation public schema does not change. Fixed slots remain in their existing policy/DB; grants use a separate ledger. Reject task-namespace collisions before startup. The [Japanese historical source](mailbox-grants_jp.md) is unchanged.
 
-## 承認された範囲と実際の有効期間
+## Policy boundaries and activation evidence
 
-2026-10-30 04:34 UTCに確認された承認は、7日間・合計32件・同時PENDING最大8件、依頼と回答各4096 UTF-8 bytes、要求期限24時間、回答返却7日、監査表示30日。検証用の新規要求も合計32件に含める。実際の開始・終了・policy hashは有効化記録とruntimeの`chat-mailbox-grant.json`に固定し、サービス再起動や再送では延長しない。exampleの時刻は有効化記録ではない。
+The historical approval recorded at 2026-10-30 04:34 UTC allowed seven days, 32 total requests, eight pending requests, 4,096 UTF-8 bytes each for request/answer, a 24-hour request deadline, seven-day answer retrieval, and a 30-day audit view. Validation requests consume the same total budget. This historical record is not authorization to activate or renew a grant now.
 
-| 項目 | 強制する境界 |
-|---|---|
-| 対象 | 1個のtask UUID、purpose=`agent-orchestrator-development` |
-| 内容 | 非機密の開発相談という運用上の範囲。自動secret分類・著者本人認証ではない |
-| 初回登録 | request UUIDと要求SHA-256をimmutable pin。hash/本文競合を拒否 |
-| grant期間 | not_before以上、expires_at未満だけ登録・回答保存可。最大7日 |
-| 要求期限 | 初回登録＋24時間とgrant終了の早い方。期限後は同内容のwrite再送も拒否 |
-| 予算 | 総数32、未回答かつ期限内8。回答でpending枠のみ解放。期限切れ・取消・再接続で総数を減らさない |
-| 本文 | 各4096 UTF-8 bytes以下。不正Unicode・空白のみ・hash不一致を拒否 |
-| PENDING読取り | 要求期限までは要求本文、以降はEXPIRED metadataのみ |
-| ANSWERED読取り | 回答保存から7日未満は要求と回答を返却。grant期限後もこの期間内は読取り可能 |
-| 取消 | 永続REVOKED。登録・回答保存禁止、既存/未登録とも本文を返さずmetadataのみ |
-| 監査 | ID・hash・時刻・固定event。30日分のlogical view。MCP到達監査にも本文を記録しない |
-| 容量 | private SQLite ledger最大1MiB。journalやディスク全体quotaは別 |
+Actual start/end and policy hash are fixed by the activation record and private runtime `chat-mailbox-grant.json`; restart or resend cannot extend them. Example timestamps are not activation evidence.
 
-期限切れgrantの新しいIDはNOT_FOUNDとgrant_state=EXPIREDを返す。これを新規登録可能とは扱わない。要求/回答の返却期限切れはEXPIRED、取消はREVOKED。読取りの保存有無・grant状態・hashと本文の有無を分けて扱う。clientはterminal状態になったとき、先行する読取りの本文も出力しない。
+| Item | Enforced boundary |
+| --- | --- |
+| Target | One task UUID, purpose `agent-orchestrator-development` |
+| Content | Operationally limited to nonconfidential development consultation; not automatic secret classification or author authentication |
+| First registration | Immutable request UUID and request SHA-256; reject hash/body conflict |
+| Grant window | Register/save answers only at or after `not_before` and before `expires_at`; maximum seven days |
+| Request deadline | Earlier of first registration plus 24 hours and grant expiry; even identical write retries are refused afterward |
+| Budget | 32 total, eight unexpired unanswered; answers free pending capacity only; expiry/revocation/reconnection never reduce total consumption |
+| Body | At most 4,096 UTF-8 bytes each; reject invalid Unicode, whitespace-only text, and hash mismatch |
+| Pending reads | Return request body until its deadline; then only `EXPIRED` metadata |
+| Answered reads | Return request/answer for less than seven days after saving, even if the grant has since expired |
+| Revocation | Durable `REVOKED`; forbid registration/save and return metadata without bodies, including for unregistered IDs |
+| Audit | IDs, hashes, times, fixed events; logical 30-day view; no body in MCP reachability audit |
+| Capacity | Private SQLite ledger at most 1 MiB; journals and total disk quota are separate |
 
-## 起動・再接続
+A new ID under an expired grant returns `NOT_FOUND` with `grant_state=EXPIRED`, not permission to register. Retrieval expiry is `EXPIRED`; revocation is `REVOKED`. Distinguish saved state, grant state, hash, and body availability. On terminal state, clients must also suppress body text from earlier reads.
 
-runtimeの固定ファイル`chat-mailbox-grant.json`は所有者0600、runtimeは0700。正確な4 field（schema_version/enabled/policy/policy_sha256）だけを受理する。任意pathをMCP引数に渡す経路はない。`GrantPolicy`は未知属性・別purpose・型・UUID・上限を検査する。同じgrant_idのpolicy hash変更は既存ledgerで拒否する。
+## Startup and uncertain writes
 
-preflightは全起動引数・既存キー参照・policyを停止前に照合し、ledgerを作成しない。再開は保存済みflagとキー参照を継承する。期限切れでもretained answerを取得できるよう再接続は可能。新規writeの可否は各transaction内で再検査する。
+The fixed runtime file is owner-only 0600 under a 0700 runtime. Accept exactly `schema_version`, `enabled`, `policy`, and `policy_sha256`; no MCP argument can select an arbitrary path. `GrantPolicy` validates keys, purpose, types, UUIDs, and limits. The existing ledger rejects a changed policy hash for the same grant ID.
 
-SQLiteのBEGIN IMMEDIATE取得後に時刻とpending/totalを確認し、commit直前にも期限を確認する。競合書込みでも上限・初回hash・回答の不変性を守る。ACK喪失はUNKNOWN。既存ID/hashによるgetterだけで照合し、自動write再送や別ID発行をしない。
+Preflight validates all startup flags, saved key references, and policy before stopping anything and does not create a ledger. Reconnection retains saved flags/key references and can read retained answers after expiry. Every write transaction independently checks permission. After `BEGIN IMMEDIATE`, recheck time and pending/total budgets, then check expiry again immediately before commit. Concurrent writes preserve limits, first hash, and answer immutability.
 
-## オペレータCLI
+Lost ACK is `UNKNOWN`. Reconcile through getters using the same ID/hash, never an automatic write retry or a new ID.
 
-シェル例はrepo rootで実行する。`RUNTIME`を対象の既存private runtimeに、`GRANT_ID`と`POLICY_SHA256`を有効化記録に合わせて設定する。秘密の値を入れない。`mailbox_ops.py`はJSONをstdinから受け取り、既定で本文をstdoutへ出さない。
+## Operator CLI
+
+Run from repository root. Set `RUNTIME` to the existing private runtime, and `GRANT_ID`/`POLICY_SHA256` to the activation record, not secret values. `mailbox_ops.py` accepts stdin JSON and suppresses bodies by default.
 
 ```bash
 python3 -B scripts/mailbox_ops.py prepare --runtime "$RUNTIME" < nonsecret-draft.json
@@ -43,18 +45,16 @@ python3 -B scripts/mailbox_grant_admin.py status --runtime "$RUNTIME" --grant-id
 python3 -B scripts/mailbox_grant_admin.py revoke --runtime "$RUNTIME" --grant-id "$GRANT_ID" --policy-sha256 "$POLICY_SHA256" --apply
 ```
 
-prepareは候補を組み立てるだけでpolicyやledgerを作成せず、取消状態を含むwrite許可の確認にはならない。status/revokeは既存ledgerのみを開き、存在しないDBを作成しない。revokeは明示`--apply`が必要。同一grant ID/hashを確認して不可逆に取消し、取消後のstatusで照合する。不確実なrevokeを自動再送しない。公開MCPに取消や管理コマンドを追加しない。
+`prepare` builds a candidate, not policy/ledger state or proof of write permission. `status`/`revoke` open an existing ledger only. Revocation requires explicit `--apply`, verifies grant ID/hash, is irreversible, and must be checked afterward. Never blindly retry uncertain revocation. Administration/revocation is not exposed through public MCP.
 
-## Rollback
+## Rollback and retention
 
 ```bash
 python3 -B scripts/poc_services.py grant-rollback-plan --runtime "$RUNTIME"
 ```
 
-出力された停止前検査・stop・start・status手順でgrant flagだけを外す。既存11操作・固定slot・認証・公開範囲を保全し、grant ledger/configはprivateに残す。復帰時は同じgrant/policy/hashを使用し、総数や期限をリセットしない。`rollback-plan`はmailbox全体を外して旧7操作へ戻す別手順。どちらもplanだけではサービスを変更しない。稼働/UNKNOWNの仕事があれば停止しない。
+The returned preflight/stop/start/status plan removes only the grant flag, preserving eleven operations, fixed slots, authentication, exposure, and private grant ledger/config. Reinstatement uses the same grant/policy/hash without resetting counts/time. `rollback-plan` instead removes the whole mailbox and returns to seven operations. Plans do not change services. Do not stop while active/unknown work remains.
 
-## 保持と実証の限界
+Seven days is a body-return window and thirty days an audit-metadata view, not physical deletion. There is no VACUUM, backup deletion, or automatic prune; private DB bytes remain after expiry. Existing MCP session-audit limits are separate and do not implement 30-day deletion.
 
-7日は本文の返却期間、30日はledger監査metadataの表示期間。物理削除・VACUUM・backup削除・自動pruneは実装しない。期限後もprivate DBにbytesが残る。MCP adapterの既存到達監査ファイルは別の容量制限を持ち、自動30日削除ではない。
-
-同じ認証scopeのclientが対象workstreamで依頼/回答を読み書きする。ID/hashは会話本人や回答品質の証明ではない。この機能はChatを起動せず、任意ファイル/URL/shell/タスク・新キー・モデル起動を公開しない。ローカルMCP stdioでの実証、hosted schema/health確認、Dot直接呼出し、実Chat往復は別の証拠として報告する。
+Clients sharing authentication scope can read/write that workstream. IDs/hashes do not authenticate a conversation author or answer quality. Grants do not wake Chat, expose arbitrary files/URLs/shell/tasks, create keys, or launch models. Report local stdio proof, hosted schema/health, direct Dot calls, and real Chat round trips as separate evidence.

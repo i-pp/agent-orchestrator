@@ -3,6 +3,10 @@ name: Common policy transitions
 on:
   pull_request:
     paths:
+      - "AGENTS.md"
+      - ".agents/skills/common-policy/SKILL.md"
+      - "config/policy.json"
+      - "config/upstream-policy.json"
       - "src/common_policy.py"
       - "src/upstream_policy.py"
       - "src/codex_pipeline.py"

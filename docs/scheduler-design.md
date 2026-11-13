@@ -1,88 +1,58 @@
-# 永続スケジューラー設計 — Phase 2-D2
+# Persistent Scheduler Design
 
-## 取得順序と実行権限
+This reference describes Phase 2-D2. The [Japanese historical source](scheduler-design_jp.md) and [phase report](phase2-d2-report.md) retain the original evidence and limitations.
 
-SQLiteのQUEUED taskを自動取得し、最大2 workerを実行する。
-FIFOはtasksのSQLite挿入順（rowid）。createdは観測用時刻であり、時計の後退で取得順を変えない。
-自動削除／VACUUM／外部DB編集で順序を再構成する運用は今回対象外。
-順番の先頭がworkspace競合で取得できなければ、その後を勝手に追い越さない。
-旧共有workspaceは1件だけ、独立workspaceは最大2件。同じworkspace／threadの同時resumeを禁止する。
+## FIFO and one-shot execution
 
-daemonはdaemon.lockをexclusiveに保持する。通常run／run-pairはshared取得が必要なのでdaemon実行中は拒否する。
-submitやshowは実行の取得と別操作。Socket以外で保存されたQUEUEDも対象とする。
-daemon開始前から通常runnerが動いていれば、daemonの所有権取得を拒否し、そのprocessを停止しない。
+The scheduler claims SQLite `QUEUED` tasks and runs at most two workers. FIFO uses insertion `rowid`, not the wall-clock `created` timestamp. It does not overtake a head task blocked by a workspace lease. Legacy shared-workspace work is serial; independent workspaces can use two slots. Concurrent resume of a workspace/thread is forbidden. Reconstructing order through external DB edits, automatic deletion, or VACUUM is outside this phase.
 
-取得手順:
+The daemon exclusively owns `daemon.lock`. Ordinary `run`/`run-pair` need a shared lease and are rejected while the daemon runs. Submission and inspection are separate from execution; queued work submitted without the socket is eligible too. An existing ordinary runner blocks daemon ownership and is not killed.
 
-1. recover／offline reconcile、容量、pause、既存owner、workspace境界を確認する。
-2. BEGIN IMMEDIATEでQUEUEDを再確認し、timeoutと一意なdispatch予約を保存する。
-3. 専用資源scopeにworkerを起動し、PID/startを保存してSTARTEDへ進める。
-4. workerは有限時間だけhandoffを待つ。daemonのboot/PID/start、nonce、記録processからの祖先関係を検査する。
-5. 条件付きUPDATEでnonceを一度だけ消費しAUTHORIZEDへ進む。
-6. 既存runnerのtask/workspace/slot leaseとQUEUEDのCAS claim、executions.task_id UNIQUEで実行を一度に限定する。
-7. 実行・独立検証・資源解放は既存runnerが行う。daemonはstdoutや終了コードだけでタスク成功を作らない。
+1. Check recovery/offline reconciliation, storage, pause, existing owners, and workspace boundaries.
+2. In `BEGIN IMMEDIATE`, recheck `QUEUED` and persist the timeout and unique dispatch reservation.
+3. Start a worker in a private resource scope, save PID/start identity, and mark `STARTED`.
+4. The worker waits a bounded time for handoff and validates daemon boot/PID/start, nonce, and ancestry from the recorded process.
+5. Consume the nonce once with a conditional update and mark `AUTHORIZED`.
+6. Existing task/workspace/slot leases, the `QUEUED` compare-and-swap claim, and unique `executions.task_id` still enforce one execution.
+7. The runner executes, independently verifies, and cleans up. Worker stdout or an exit code alone never establishes task success.
 
-予約を保存した後にworkerを起動するため、forkとDBの隙間も再実行で埋めない。
-失われた予約はUNKNOWNへ移し、自動再dispatchしない。予約前の未実行QUEUEDは保持する。
-nonceは内部の相関・一回限りhandoff用で、Unix peer認証の代わりではない。モデルには制御socket／DBを見せない。
+Persist the reservation before spawning. Do not fill a fork/DB gap by rerunning. A lost reservation becomes `UNKNOWN`; an unreserved queued task remains queued. The nonce correlates a one-time handoff; it is not a replacement for Unix peer authentication. Models cannot see the control socket or DB.
 
-## 永続化と互換性
+## Durable state and compatibility
 
-既存task DBのuser_version=3、旧task/execution/thread/turn/workspace/snapshotを維持する。
-daemon初回に排他とSQLite backupを取り、追加表だけをtransactionで作成する。
+Core schema `user_version=3` and existing IDs remain intact. The first daemon start takes exclusivity and a SQLite backup before transactionally adding tables:
 
-| 表 | 記録 |
+| Table | Data |
 | --- | --- |
-| scheduler_state | 拡張schema_version=1、pause、更新時刻 |
-| scheduler_options | task_idと取得時に固定したtimeout |
-| scheduler_dispatches | task_id UNIQUE、nonce、daemon owner、phase、processes、worker owner、scope記述、cleanup、時刻 |
+| `scheduler_state` | Extension `schema_version=1`, pause, update time |
+| `scheduler_options` | Task ID and fixed timeout |
+| `scheduler_dispatches` | Unique task ID, nonce, daemon/worker owner, phase, processes, scope description, cleanup, timestamps |
 
-pauseは再起動後も保持する。shutdown自体はpause値を書き換えず、次の明示起動では保存済みpauseに従う。
-timeoutはSocket submitと同じtransaction、旧方式投入の場合はdispatch予約と同じtransactionで固定する。
-request_keyの再送は同一taskを返し、異なる条件／timeoutの同じkeyは拒否する。
+Pause survives restart. Shutdown does not change it; a later explicit start respects the stored value. Socket submission fixes timeout in its submission transaction; legacy submission fixes it with the dispatch reservation. Reusing a request key returns the same task only for identical criteria and timeout.
 
-追加schema作成前backupはdb-backups/before-scheduler-v1-UUID.sqlite。
-途中失敗はtransaction rollbackする。既存行を削除・初期化せず、未認識schemaを推測で変換しない。
-既存db-rollbackはdaemon leaseとscheduler表の存在を確認し、永続キュー記録を捨てる復元を拒否する。
-コードを戻す場合も先にdaemonとworkerを停止し、recover／backupと対応ソースを確認する。
-古いD1コードのdb-rollbackをD2のDBに対して実施しない。表を自動DROPする手順は用意しない。
+Backups use `db-backups/before-scheduler-v1-UUID.sqlite`. A failed extension transaction rolls back without clearing existing rows. Unknown schemas are not guessed. DB rollback checks daemon ownership and scheduler tables and refuses to discard durable queue records. Stop daemon/workers and verify recovery, backup, and matching source before reverting code. Never run old D1 rollback code against a D2 DB; no automatic table-drop procedure exists.
 
-## 回復とUNKNOWN
+## Recovery and `UNKNOWN`
 
-起動時とworker終了時に既存のrecover_abandonedを使い、不在ownerのRUNNING／VERIFYINGをUNKNOWNへ移す。
-保存したdispatch予約、worker PID/start/bootとcgroup、Codex所有process／scope、workspace manifest、ログを照合する。
-workerがまだ停止していなければ、その間はrecovery_pendingとして新規dispatchを止める。
-所有daemonが死んだ後の起動前隙間には、事前に記録した専用cgroupパスも使う。推測の成功／失敗は作らない。
-解放を証明できない予約はUNKNOWNのまま全体を止め、人間の調査対象とする。
+Startup and worker exit use existing abandoned-owner recovery. Reconcile reservations, worker boot/PID/start and cgroup, Codex processes/scopes, manifests, and logs. While a worker is still stopping, `recovery_pending` blocks new dispatch. A recorded private cgroup path also covers the pre-launch checkpoint gap after daemon death. Unproven cleanup keeps the reservation unknown and stops dispatch for human investigation.
 
-UNKNOWNは新規投入扱いに戻さない。WAITING_FOR_HUMAN／FAILEDも自動再実行しない。
-会話再開は明示的な新taskと既存のallow_resume判断を必要とし、処理途中の復元とは区別する。
-現在executionと一致する明示resume許可がある場合だけ、そのUNKNOWN workspaceを新taskが使用できる。
-runnerは直前にも公式履歴・資源・副作用・許可の鮮度を照合する。
+`UNKNOWN`, `WAITING_FOR_HUMAN`, and `FAILED` are not automatically resubmitted. Conversation resume is an explicit new task with an `allow_resume` decision, not restoration of an interrupted command. The decision must match the current execution, and the runner rechecks official history, resources, side effects, and approval freshness immediately before resume.
 
-| 条件 | 新規dispatchへの影響 |
+| Condition | Dispatch effect |
 | --- | --- |
-| worker／Codex資源の解放不明、失われたhandoff | 全体を停止 |
-| 旧共有workspaceのUNKNOWN | 全体を停止 |
-| UNKNOWNのworkspace検証／offline照合ができない | 全体を停止 |
-| UNKNOWNの資源解放・照合済み、独立workspace | そのworkspaceを保護。他の独立workspaceは可能 |
-| 同一workspace／threadが使用中 | FIFO先頭で待機 |
-| 現在executionに対応した明示resume許可 | runnerの再照合を条件に新taskとして実行可能 |
-| 容量・空き予算超過 | 新規dispatch停止。制御socketは維持 |
-| SQLite競合 | 期限付きで延期／エラー。再取得や成功推測をしない |
+| Worker/Codex cleanup unknown or handoff lost | Stop all dispatch |
+| Unknown legacy shared workspace | Stop all dispatch |
+| Unknown workspace cannot be validated/reconciled offline | Stop all dispatch |
+| Independent unknown workspace, reconciled and resources released | Protect that workspace; other independent work may proceed |
+| Workspace/thread in use | Wait at the FIFO head |
+| Explicit resume approval for current execution | New task may run after runner rechecks |
+| Storage/free-space budget exceeded | Stop dispatch; keep control socket available |
+| SQLite contention | Bounded delay/error, not duplicate claim or inferred success |
 
-Task DBのCOMPLETED直後もworker監督が完了していなければ、Socket statusのworker_pending=true、completion_verified=falseとなる。
-worker資源超過／監督喪失が後から判明した完了checkpointはUNKNOWNへ戻し、既存の検証根拠を保持する。
-scheduler_phase、scheduler_timeout、core成否・受入検証・人間判断を分けて監視する。
-phase=FINISHED／ORPHANEDはworker journalの状態であり、タスク成功を意味しない。
+A task DB `COMPLETED` checkpoint can still have `worker_pending=true` and `completion_verified=false` in socket status. Later resource-limit or supervision failure returns that checkpoint to `UNKNOWN`, preserving verification evidence. Keep scheduler phase/timeout, core execution, acceptance, and human decision separate. `FINISHED`/`ORPHANED` describe the worker journal, not task success.
 
-## 停止・保全
+## Stop and preservation
 
-pauseは新規取得だけを止める。cancelは指定taskだけ。shutdownはdaemonが取得したtaskだけを中断する。
-停止時の未取得QUEUED、UNKNOWN、受入根拠、ログ、snapshot、backupを保存する。
-強制解放まで進んだ場合もcleanupとその理由を記録し、未確定タスクを成功にしない。
-同時数の既存slot leaseとcore UNIQUEは残し、スケジューラーだけを信用する設計にしない。
+Pause stops new claims only; cancel targets one task; shutdown interrupts only daemon-owned tasks. Preserve unclaimed queued work, unknown work, acceptance evidence, logs, snapshots, and backups. Forced cleanup records its reason and does not turn uncertainty into success. Existing slot leases and core unique constraints remain independent safeguards.
 
-systemd user serviceのRestart設計は[daemon設計](daemon-design.md)を参照。
-今回の実測は前景daemonの再起動であり、unitをinstall/startしていないためsystemdの自動Restartそのものは未検証。
-日単位のsoak、高負荷、厳密disk quota、OS再起動・停電、他OS／CLI版は未検証。
+The D2 evidence measured foreground-daemon restart, not systemd automatic restart; later service work is separate. Multi-day soak, high load, hard total-disk quotas, OS restart/power loss, other operating systems, and other CLI versions were not verified by D2.

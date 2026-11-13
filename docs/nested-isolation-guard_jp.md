@@ -1,0 +1,15 @@
+# 追加隔離作成の起動前ガード
+
+Codexの隔離環境からさらに隔離環境を作成しない（2026-10-29の追加運用制約）。共通ポリシーv1.0の本文は変更しない。
+
+`src/isolation_guard.py`は読み取りだけでprocfsを観測する。既知のbwrap profile、sandbox PID1、追加のPID/user namespaceの証拠を`SANDBOXED`、限定的なホスト観測の一致を`HOST_CONTEXT`、不足・未知のprofile等を`UNKNOWN`とする。HOST_CONTEXTは権限や実行成功を保証しない。sysctlの値では可否を決めず、設定を変更しない。user namespaceだけではCodex起動元や権限不足とは断定できない。
+
+コードによる拒否は、既存の`isolation.launch`/`isolated_launch`（preflight・version・identityを含む）、`verification_launch`、`development_poc.launch`、および`transport.Process`へ直接渡されるbwrap/unshare/nsjail/firejailに適用する。隔離作成を宣言する入口で、引数の構築や認証マウント準備、Process/Popenより前に検査する。既知の隔離では`NESTED_ISOLATION_FORBIDDEN`、判定不能では`ISOLATION_CONTEXT_UNKNOWN`で拒否し、実行を試して判定しない。回避用の設定や環境変数は設けない。
+
+拒否されたtaskは既存の`WAITING_FOR_HUMAN`、該当するcodex/verification statusは`BLOCKED`にする。error/evidenceに`status=BLOCKED`、`reason_code`、`executed=false`、`quality_verdict=UNASSESSED`を保存する。実装済みのCodex応答後に検証だけ拒否された場合、codex_statusはSUCCEEDEDを保持する。検証項目のpassedはnull、全体all_passedはfalse（受入未成立）であり、品質FAILではない。隔離なしのfallbackも自動再実行もない。通常の人間レビューで未実行をPASSにすることもできない。再開には適切な通常実行環境と明示的な新しい実行判断が必要になる。
+
+readonly MCPはBLOCKEDと固定の理由コードのみ公開する。MCP権限・ツール追加・書込み公開はない。CLI/DBの詳細には観測理由を残す。既存daemonは自動再起動せず、起動済みプロセスが新しいPythonコードを読むには通常の次回起動が必要。
+
+範囲外: このガードはOS sandbox、任意のshellプログラムの解析、モデル内部toolの全コマンド監視、別アプリや別repoのlauncher制御ではない。独自launcher内の任意のラッパーや子孫processを完全に制御するものではない。Codexへの禁止指示も固定developerInstructionsとAGENTSへ追加するが、その部分は運用規約である。既存B4等の外部評価launcherへコードを適用したとは主張しない。そこでも隔離必須評価は未実行・BLOCKEDで保留する。
+
+ファイル検査・静的検査・追加隔離なしの通常の単体テストは継続可能。namespace統合試験はこの環境から再試行しない。新しいガードの試験はmock/単体試験とfake peerを使い、実モデル、認証、namespace操作を実行しない。

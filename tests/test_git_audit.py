@@ -36,13 +36,24 @@ class GitAuditTests(unittest.TestCase):
     def result(self):
         return audit_module.audit(self.root)
 
-    def test_all_thirteen_actual_portable_policy_role_skill_files_pass(self):
-        self.assertEqual(len(audit_module.PORTABLE_CONFIG_FILES),13)
+    def test_only_reviewed_portable_policy_role_skill_files_pass(self):
+        self.assertEqual(len(audit_module.PORTABLE_CONFIG_FILES),22)
         for name in audit_module.PORTABLE_CONFIG_FILES:
             self.write(name,(PROJECT/name).read_bytes())
         result=self.result()
         self.assertTrue(result['passed'],result['findings'])
         self.assertEqual(set(result['staged_files']),audit_module.PORTABLE_CONFIG_FILES)
+
+    def test_exact_public_repository_metadata_and_integration_sources_pass(self):
+        self.assertEqual(len(audit_module.PUBLIC_REPOSITORY_FILES),19)
+        for name in audit_module.PUBLIC_REPOSITORY_FILES:
+            self.write(name,(PROJECT/name).read_bytes())
+        result=self.result()
+        self.assertTrue(result['passed'],result['findings'])
+        for name in ['.github/workflows/unknown.yml','.github/credentials.json',
+                     'integrations/unknown/service.mjs','integrations/sites-approval/.env',
+                     'integrations/sites-approval/operator.local.json']:
+            with self.subTest(name=name):self.assertFalse(audit_module.path_allowed(name))
 
     def test_source_examples_and_empty_secret_environment_template_pass(self):
         for name in ['src/module.py','tests/fixtures/example.sql','docs/example.md',
@@ -53,9 +64,11 @@ class GitAuditTests(unittest.TestCase):
 
     def test_local_paths_stay_forbidden_including_tracked_operator_configs(self):
         names=['.runtime/tasks.sqlite','.codex/auth.json','.codex/config.local.toml',
-               '.codex/agents/researcher.local.toml','.agents/skills/common-policy/auth.json',
+               '.codex/agents/researcher.local.toml','.codex/agents/security_reviewer.local.toml',
+               '.codex/agents/orchestrator.private.toml','.agents/skills/common-policy/auth.json',
                '.serena/project.yml','.vscode/settings.json','.aws/credentials',
                'config/policy.local.json','examples/host.private/.env.example',
+               'config/native-team.local.json','config/native-team.private.json',
                '.env.production','examples/private.key','docs/session.jsonl',
                'docs/runner.pid','docs/runner.socket','docs/local.env',
                'docs/project.code-workspace','docs/.coverage','src/pkg.egg-info/PKG-INFO',

@@ -141,7 +141,15 @@ class EventLifecycleTests(unittest.TestCase):
         self.assertEqual(BLOCKED_REASON_CODES, frozenset({
             'CATALOG_REJECTED', 'MODEL_NOT_AVAILABLE_OR_ALLOWED',
             'SUBSCRIPTION_AUTH_REQUIRED', 'RESUME_REJECTED',
-            'RESUME_SCOPE_MISMATCH'}))
+            'RESUME_SCOPE_MISMATCH',
+            'REASONING_EFFORT_NOT_SUPPORTED',
+            'LEGACY_REASONING_EFFORT_MISSING',
+            'IMMUTABLE_MODEL_SELECTION_CHANGED',
+            'MODEL_CATALOG_UNKNOWN',
+            'MODEL_CATALOG_INVALID',
+            'MODEL_CATALOG_BOUND',
+            'RESUME_REASONING_EFFORT_MISMATCH',
+        }))
         definition = next(event for event in event_definitions()
                           if event['name'] == EVENT_NAMES['task_blocked'][0])
         payload = definition['payloadSchema']

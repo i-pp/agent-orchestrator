@@ -56,7 +56,7 @@ class PolicyRunnerTests(unittest.TestCase):
         for name in ['docs/ai/editorial-policy.md','policies/editorial.md']:
             self.assertEqual(text.count('--- UPSTREAM '+name+' ---\n'),1)
             self.assertIn(name,self.bundle.metadata()['upstream']['files'])
-        self.assertIn('# Editorial Policy v2.0 — Reader First, Evidence Always',text)
+        self.assertIn('# Editorial Policy v2.0 \u2014 Reader First, Evidence Always',text)
         self.assertIn('The sole authoritative editorial standard is',text)
 
     def test_fresh_thread_contains_full_policy_and_provenance(self):

@@ -15,7 +15,8 @@ import time
 import uuid
 
 from private_state import _private, _json
-from codex_app_protocol import ProtocolUnknown, RpcError
+from codex_app_protocol import (ProtocolUnknown, RpcError,
+    validate_model_page, valid_reasoning_effort)
 from codex_approvals import (projection, public_record, request_key as approval_rpc_key,
     VISIBLE_METHODS, RESPONDABLE_METHODS, MAX_APPROVALS_PER_TASK)
 
@@ -28,6 +29,8 @@ MAX_EVENTS = 4096
 MAX_OPS = 512
 LEDGER_BYTES = 2 * 1024**2
 COMPLETION_RESERVE = 64 * 1024
+CATALOG_RESPONSE_BYTES = 20 * 1024
+CATALOG_PAGE_SIZE = 20
 
 
 class PipelineError(ValueError):
@@ -90,11 +93,14 @@ def tool_definitions():
     key = {'type': 'string', 'pattern': KEY, 'maxLength': 128}
     body = {'type': 'string', 'minLength': 1, 'maxLength': 4096}
     model = {'type': 'string', 'minLength': 1, 'maxLength': 160}
+    effort = {'type': 'string', 'minLength': 1, 'maxLength': 64}
     definitions = [
         ('capabilities', {}, [], True),
-        ('thread_start', {'workspace': key, 'model': model, 'request_key': key}, ['workspace', 'model', 'request_key'], False),
-        ('task_submit', {'thread_id': ident, 'prompt': body, 'model': model, 'request_key': key}, ['thread_id', 'prompt', 'request_key'], False),
-        ('chat_store', {'thread_id': ident, 'prompt': body, 'model': model, 'request_key': key}, ['thread_id', 'prompt', 'request_key'], False),
+        ('models_list', {'limit': {'type':'integer','minimum':1,'maximum':20},
+                         'cursor': {'type':'string','maxLength':80}}, [], True),
+        ('thread_start', {'workspace': key, 'model': model, 'reasoning_effort': effort, 'request_key': key}, ['workspace', 'model', 'request_key'], False),
+        ('task_submit', {'thread_id': ident, 'prompt': body, 'model': model, 'reasoning_effort': effort, 'request_key': key}, ['thread_id', 'prompt', 'request_key'], False),
+        ('chat_store', {'thread_id': ident, 'prompt': body, 'model': model, 'reasoning_effort': effort, 'request_key': key}, ['thread_id', 'prompt', 'request_key'], False),
         ('chat_queue', {'task_id': ident, 'request_key': key}, ['task_id', 'request_key'], False),
         ('chat_steer', {'thread_id': ident, 'prompt': body, 'request_key': key}, ['thread_id', 'prompt', 'request_key'], False),
         ('threads_list', {'limit': {'type':'integer','minimum':1,'maximum':20},
@@ -114,7 +120,8 @@ def tool_definitions():
         ('pipeline_tick', {}, [], False),
     ]
     descriptions = {
-        'capabilities': 'List operator-approved workspaces, bounds and available models. No inference. Availability is not billing proof.',
+        'capabilities': 'Observe approved model/effort choices and a bounded provider catalog page. Discovery is not model execution or billing proof.',
+        'models_list': 'Read a bounded fresh provider model/effort page. Unapproved or hidden entries cannot be selected. No inference.',
         'thread_start': 'Create a scoped Codex conversation with a validated model. Does not start a turn.',
         'task_submit': 'Persist input in FIFO, then dispatch if idle. Busy input is queued, never silently steered.',
         'chat_store': 'Store immutable input without executing or queueing it.',
@@ -159,13 +166,15 @@ def validate_arguments(name, args):
             if not isinstance(value, str) or not re.fullmatch('[a-f0-9]{64}', value): raise PipelineError('INVALID_HASH')
         elif key == 'decision':
             if value not in ('accept', 'decline'): raise PipelineError('INVALID_DECISION')
+        elif key == 'reasoning_effort':
+            if not valid_reasoning_effort(value): raise PipelineError('INVALID_REASONING_EFFORT')
         elif key == 'model':
             if not opaque(value): raise PipelineError('INVALID_MODEL')
         elif key == 'cursor':
             if not isinstance(value,str) or not re.fullmatch(r'[a-f0-9]{64}:[0-9]{1,6}',value): raise PipelineError('INVALID_CURSOR')
         elif type(value) is not int or value < (1 if key == 'limit' else 0) or (key == 'limit' and value > 50):
             raise PipelineError('INVALID_PAGE')
-        elif name == 'codex_threads_list' and value > 20: raise PipelineError('INVALID_PAGE')
+        elif name in ('codex_threads_list', 'codex_models_list') and value > 20: raise PipelineError('INVALID_PAGE')
 
 
 class Pipeline:
@@ -283,6 +292,22 @@ class Pipeline:
         if ident not in s['tasks']: raise PipelineError('TASK_NOT_OWNED')
         return s['tasks'][ident]
 
+    @staticmethod
+    def _duplicate_result(op):
+        return {**op.get('result', {'status': 'UNKNOWN' if op['status'] == 'ISSUED' else op['status'],
+                **{k: v for k, v in op['context'].items() if k in ('thread_id', 'task_id')}}),
+                'duplicate': True, 'automatic_retry': False}
+
+    def _prior_operation(self, key, kind, args):
+        # Match before discovery, including when discovery now fails. The
+        # reservation checks again atomically after bounded read-only discovery.
+        def read(s):
+            prior = s['ops'].get(key)
+            if not prior: return None
+            if prior['fingerprint'] != digest([kind, args]): raise PipelineError('REQUEST_KEY_CONFLICT')
+            return self._duplicate_result(prior)
+        return self._mutate(read)
+
     def _operation(self, key, kind, args, prepare, effect, finish):
         fingerprint = digest([kind, args])
         def reserve(s):
@@ -301,9 +326,7 @@ class Pipeline:
             return True, s['ops'][key]
         fresh, op = self._mutate(reserve)
         if not fresh:
-            return {**op.get('result', {'status': 'UNKNOWN' if op['status'] == 'ISSUED' else op['status'],
-                    **{k: v for k, v in op['context'].items() if k in ('thread_id', 'task_id')}}),
-                    'duplicate': True, 'automatic_retry': False}
+            return self._duplicate_result(op)
         try:
             result = effect(op['context'])
         except Exception as error:
@@ -319,6 +342,8 @@ class Pipeline:
                     # A refused interrupt/steer does not imply the turn stopped.
                     if kind == 'dispatch':
                         task['state'] = status
+                        if status == 'FAILED' and 'reasoning_effort_evidence' in task:
+                            task['reasoning_effort_evidence']['turn_transport'] = 'rejected'
                         if status == 'FAILED':
                             s['threads'][task['thread_id']]['active_task'] = None
                             # The notification bridge needs stable routing IDs for a
@@ -341,29 +366,144 @@ class Pipeline:
                     **{k: v for k, v in op['context'].items() if k in ('thread_id', 'task_id')}}
 
     def _catalog(self):
-        account = self.client.request('account/read', {'refreshToken': False})
-        if (account.get('account') or {}).get('type') != 'chatgpt': raise PipelineError('SUBSCRIPTION_AUTH_REQUIRED')
-        data, cursor = [], None
-        for _ in range(4):
-            page = self.client.request('model/list', {'includeHidden': False, 'limit': 100, **({'cursor': cursor} if cursor else {})})
-            data.extend(page['data'])
-            cursor = page.get('nextCursor')
-            if not cursor: break
-        if cursor: raise PipelineError('MODEL_CATALOG_BOUND')
-        return {m['model'] for m in data if not m.get('hidden', False)}
+        try:
+            account = self.client.request('account/read', {'refreshToken': False})
+            if (not isinstance(account, dict) or not isinstance(account.get('account'), dict)
+                    or account['account'].get('type') != 'chatgpt'):
+                raise PipelineError('SUBSCRIPTION_AUTH_REQUIRED')
+            data, cursor, cursors, ids, models = [], None, set(), set(), set()
+            for _ in range(4):
+                page = self.client.request('model/list', {'includeHidden': False, 'limit': 100,
+                    **({'cursor': cursor} if cursor else {})})
+                validate_model_page(page)
+                for row in page['data']:
+                    if row['id'] in ids or row['model'] in models:
+                        raise PipelineError('MODEL_CATALOG_INVALID')
+                    ids.add(row['id']); models.add(row['model'])
+                    data.append({'id': row['id'], 'model': row['model'], 'display_name': row['displayName'],
+                        'hidden': row['hidden'], 'is_default': row['isDefault'],
+                        'default_reasoning_effort': row['defaultReasoningEffort'],
+                        'supported_reasoning_efforts': [e['reasoningEffort'] for e in row['supportedReasoningEfforts']]})
+                cursor = page.get('nextCursor')
+                if cursor is None: break
+                if cursor in cursors: raise PipelineError('MODEL_CATALOG_INVALID')
+                cursors.add(cursor)
+            if cursor is not None: raise PipelineError('MODEL_CATALOG_BOUND')
+            return data
+        except RpcError:
+            raise PipelineError('CATALOG_REJECTED') from None
+        except PipelineError:
+            raise
+        except Exception:
+            # Discovery is read-only. Never expose provider/transport exceptions
+            # or turn an incomplete page into positive availability.
+            raise PipelineError('MODEL_CATALOG_UNKNOWN') from None
 
-    def _model(self, model):
-        if model not in self.policy['models'] or model not in self._catalog(): raise PipelineError('MODEL_NOT_AVAILABLE_OR_ALLOWED')
+    def _model(self, model, catalog=None):
+        if model not in self.policy['models']: raise PipelineError('MODEL_NOT_AVAILABLE_OR_ALLOWED')
+        row = next((m for m in (self._catalog() if catalog is None else catalog) if m['model'] == model and not m['hidden']), None)
+        if row is None: raise PipelineError('MODEL_NOT_AVAILABLE_OR_ALLOWED')
+        return row
+
+    @staticmethod
+    def _selection(model, requested, row=None):
+        if requested is not None and not valid_reasoning_effort(requested):
+            raise PipelineError('INVALID_REASONING_EFFORT')
+        if requested is None and row is None: raise PipelineError('MODEL_CATALOG_UNKNOWN')
+        chosen = row['default_reasoning_effort'] if requested is None else requested
+        if row is not None and chosen not in row['supported_reasoning_efforts']:
+            raise PipelineError('REASONING_EFFORT_NOT_SUPPORTED')
+        result = {'requested_reasoning_effort': requested, 'reasoning_effort': chosen,
+            'reasoning_effort_source': 'provider_default' if requested is None else 'explicit',
+            'selection_catalog_sha256': digest(row) if row is not None else None}
+        result['selection_sha256'] = digest([model, result])
+        return result
+
+    @staticmethod
+    def _assert_selection(task):
+        if 'reasoning_effort' not in task: raise PipelineError('LEGACY_REASONING_EFFORT_MISSING')
+        keys = ('requested_reasoning_effort', 'reasoning_effort', 'reasoning_effort_source', 'selection_catalog_sha256')
+        if (not valid_reasoning_effort(task['reasoning_effort']) or any(k not in task for k in keys)
+                or task.get('selection_sha256') != digest([task['model'], {k: task[k] for k in keys}])):
+            raise PipelineError('IMMUTABLE_MODEL_SELECTION_CHANGED')
+
+    @staticmethod
+    def _context_effort(result, requested, method):
+        echoed = result.get('reasoningEffort')
+        if echoed is not None and echoed != requested:
+            raise PipelineError('EFFECTIVE_REASONING_EFFORT_MISMATCH', 'UNKNOWN')
+        return {'method': method, 'parameter': 'config.model_reasoning_effort',
+            'requested': requested, 'transport': 'acknowledged', 'provider_echo': echoed,
+            'echo_status': 'matched' if echoed is not None else 'not_reported',
+            'actual_execution_verified': False}
+
+    def _public_model(self, row):
+        allowed = row['model'] in self.policy['models']
+        return {**row, 'operator_allowed': allowed, 'selectable': allowed and not row['hidden'],
+            'available': not row['hidden'], 'availability': 'unavailable' if row['hidden'] else 'observed'}
+
+    @staticmethod
+    def _projection_bytes(result):
+        # ASCII escaping is the conservative public JSON wire representation.
+        return len(json.dumps(result, ensure_ascii=True, allow_nan=False).encode())
+
+    def _catalog_page(self, catalog, args, *, base=None, nested=False):
+        snapshot, offset = digest(catalog), 0
+        if args.get('cursor'):
+            prior, raw_offset = args['cursor'].split(':')
+            offset = int(raw_offset)
+            if prior != snapshot: raise PipelineError('LIST_SNAPSHOT_CHANGED')
+            if offset > len(catalog): raise PipelineError('INVALID_CURSOR')
+        end = min(len(catalog), offset + args.get('limit', CATALOG_PAGE_SIZE))
+        while True:
+            page = {'models': [self._public_model(row) for row in catalog[offset:end]],
+                'total_models': len(catalog), 'snapshot_sha256': snapshot,
+                'next_cursor': snapshot + ':' + str(end) if end < len(catalog) else None,
+                'truncated': end < len(catalog)}
+            candidate = {**(base or {}), **({'provider_catalog': page} if nested else page)}
+            if self._projection_bytes(candidate) <= CATALOG_RESPONSE_BYTES: return page
+            end -= 1
+            if end <= offset: raise PipelineError('CATALOG_PROJECTION_BOUND')
+
+    def models_list(self, **args):
+        base = {'catalog': {'status': 'observed', 'source': 'model/list'},
+            'billing_verified': False, 'model_execution_verified': False}
+        try: catalog = self._catalog()
+        except PipelineError as error:
+            return {**base, 'catalog': {'status': 'unknown', 'source': 'model/list', 'code': error.code},
+                'models': [], 'total_models': None, 'next_cursor': None, 'truncated': False}
+        return {**self._catalog_page(catalog, args, base=base), **base}
 
     def capabilities(self):
-        available = self._catalog()
-        result = {'models': [{'model': m, 'available': m in available} for m in self.policy['models']],
+        catalog, failure = None, None
+        try: catalog = self._catalog()
+        except PipelineError as error: failure = error.code
+        available = {m['model']: m for m in catalog or [] if not m['hidden']}
+        result = {'models': [self._public_model(available[m]) if m in available else
+                    {'model': m, 'available': False, 'operator_allowed': True, 'selectable': False,
+                     'availability': 'unknown' if failure else 'unavailable'} for m in self.policy['models']],
                 'workspaces': sorted(self.policy['workspaces']),
                 'bounds': {k: self.policy[k] for k in ('max_threads', 'max_tasks', 'concurrency', 'timeout_seconds')},
                 'policy_sha256': self.common_hash, 'approval': 'human_gate_required', 'chat_wake': False,
                 'approval_details': True, 'remote_approval_enabled': self.human_decision_gate is not None,
-                'resident_scheduler': False, 'billing_verified': False}
+                'resident_scheduler': False, 'billing_verified': False, 'model_execution_verified': False,
+                'catalog': {'status': 'unknown' if failure else 'observed', 'source': 'model/list',
+                            **({'code': failure} if failure else {})}}
         if self.policy['schema'] == 2: result['capacity'] = self._mutate(self.capacity)
+        # The MCP envelope exports data twice (text and structuredContent).
+        # Keep headroom for escaping, and do not duplicate all option metadata
+        # for eight very large approved rows plus their provider page. Trim only
+        # the duplicate policy-row metadata, explicitly linking the paged source.
+        for index in range(len(result['models']) - 1, -1, -1):
+            if self._projection_bytes(result) <= CATALOG_RESPONSE_BYTES // 2: break
+            row = result['models'][index]
+            if row.get('availability') == 'observed':
+                result['models'][index] = {k: row[k] for k in
+                    ('model', 'available', 'operator_allowed', 'selectable', 'availability')}
+                result['models'][index].update(metadata_truncated=True, metadata_source='codex_models_list')
+        result['provider_catalog'] = (self._catalog_page(catalog, {}, base=result, nested=True) if catalog is not None else
+            {'models': [], 'total_models': None, 'next_cursor': None, 'truncated': False})
+        if self._projection_bytes(result) > CATALOG_RESPONSE_BYTES: raise PipelineError('CATALOG_PROJECTION_BOUND')
         return result
 
     def capacity(self, s):
@@ -393,7 +533,10 @@ class Pipeline:
             return {k:v for k,v in t.items() if k not in ('remote_id','original_remote_id','native_replacements')}
         def task_view(t):return {k:v for k,v in self._view(t).items() if k!='answer'}
         if self.policy['schema']==1 and not args:
-            return {'threads':[thread_view(t) for t in s['threads'].values()], 'tasks':[task_view(t) for t in s['tasks'].values()]}
+            legacy = {'threads':[thread_view(t) for t in s['threads'].values()], 'tasks':[task_view(t) for t in s['tasks'].values()]}
+            # Retain the small legacy convenience response, but new immutable
+            # settings must not push its duplicated MCP envelope over 64 KiB.
+            if self._projection_bytes(legacy) <= CATALOG_RESPONSE_BYTES: return legacy
         records=[]
         for t in s['tasks'].values():
             priority=0 if t['state'] in HELD else 2 if t['state'] not in TERMINAL else 4
@@ -407,41 +550,53 @@ class Pipeline:
             snapshot,raw_offset=args['cursor'].split(':');offset=int(raw_offset)
             if snapshot!=fingerprint:raise PipelineError('LIST_SNAPSHOT_CHANGED')
             if offset>len(records):raise PipelineError('INVALID_CURSOR')
-        end=min(len(records),offset+args.get('limit',20));page=records[offset:end]
-        return {'threads':[r[3] for r in page if r[1]=='thread'], 'tasks':[r[3] for r in page if r[1]=='task'],
-            'capacity':self.capacity(s),'total_records':len(records),
-            'next_cursor':fingerprint+':'+str(end) if end<len(records) else None}
+        end=min(len(records),offset+args.get('limit',20))
+        while True:
+            page=records[offset:end]
+            result={'threads':[r[3] for r in page if r[1]=='thread'], 'tasks':[r[3] for r in page if r[1]=='task'],
+                'capacity':self.capacity(s),'total_records':len(records),
+                'next_cursor':fingerprint+':'+str(end) if end<len(records) else None}
+            if self._projection_bytes(result)<16000:return result
+            end-=1
+            if end<=offset:raise PipelineError('LIST_PROJECTION_BOUND')
 
-    def start(self, workspace, model, request_key):
+    def start(self, workspace, model, request_key, reasoning_effort=None):
+        args = [workspace, model] + ([{'reasoning_effort': reasoning_effort}] if reasoning_effort is not None else [])
+        prior = self._prior_operation(request_key, 'thread_start', args)
+        if prior is not None: return prior
         if workspace not in self.policy['workspaces']: raise PipelineError('WORKSPACE_NOT_ALLOWED')
-        self._model(model)
+        selection = self._selection(model, reasoning_effort, self._model(model))
         def prepare(s):
             if self.policy['schema'] == 1 and len(s['threads']) >= self.policy['max_threads']: raise PipelineError('THREAD_CAPACITY')
             ident = str(uuid.uuid4())
             s['threads'][ident] = {'id': ident, 'remote_id': None, 'workspace': workspace, 'model': model,
                                    'active_task': None, 'archived': False, 'closing': False,
-                                   'common_policy_sha256': self.common_hash}
-            return {'thread_id': ident}
+                                   'common_policy_sha256': self.common_hash, **selection}
+            return {'thread_id': ident, 'selection_sha256': selection['selection_sha256']}
         def effect(_):
             result = self.client.request('thread/start', {'model': model, 'cwd': self.policy['workspaces'][workspace],
                 'developerInstructions': self.instructions, 'approvalPolicy': 'on-request', 'approvalsReviewer': 'user',
-                'sandbox': 'read-only', 'ephemeral': False})
+                'sandbox': 'read-only', 'ephemeral': False,
+                'config': {'model_reasoning_effort': selection['reasoning_effort']}})
             if (result.get('cwd') != self.policy['workspaces'][workspace] or result.get('model') != model
                     or result.get('modelProvider') != 'openai'
                     or result.get('approvalPolicy') != 'on-request' or result.get('approvalsReviewer') != 'user'
                     or result.get('sandbox', {}).get('type') != 'readOnly' or not opaque(result.get('thread', {}).get('id'))):
                 raise PipelineError('EFFECTIVE_SCOPE_MISMATCH', 'UNKNOWN')
+            self._context_effort(result, selection['reasoning_effort'], 'thread/start')
             return result
         def finish(s, c, result):
             t = s['threads'][c['thread_id']]
             t['remote_id'] = result['thread']['id']
+            t['context_reasoning_effort_evidence'] = self._context_effort(result, selection['reasoning_effort'], 'thread/start')
             t.update(native_creation_count=1, native_context_state='READY', history_verified=False)
             if any(other['id'] != t['id'] and other['remote_id'] == t['remote_id'] for other in s['threads'].values()):
                 raise PipelineError('REMOTE_THREAD_COLLISION', 'UNKNOWN')
             self.loaded.add(t['id'])
             self._event(s, 'thread_started', t['id'])
-            return {'status': 'READY', 'thread_id': t['id'], 'model': model}
-        return self._operation(request_key, 'thread_start', [workspace, model], prepare, effect, finish)
+            return {'status': 'READY', 'thread_id': t['id'], 'model': model, **selection,
+                    'context_reasoning_effort_evidence': t['context_reasoning_effort_evidence']}
+        return self._operation(request_key, 'thread_start', args, prepare, effect, finish)
 
     def replace_empty_context(self, thread_id, request_key, evidence, *, admission=None):
         """Explicit operator recovery only. Never called from normal dispatch."""
@@ -484,22 +639,27 @@ class Pipeline:
                 raise PipelineError('PRIOR_OR_UNKNOWN_EXECUTION_FORBIDS_REPLACEMENT')
             if any(e['kind'] not in ['operation_issued','thread_started','input_stored','input_queued'] for e in s['events']):
                 raise PipelineError('UNKNOWN_HISTORY_FORBIDS_REPLACEMENT')
+            self._assert_selection(t)
+            for task in related: self._assert_selection(task)
             t['replacement_attempts']=1
             t['original_remote_id']=t.get('original_remote_id',t['remote_id'])
             t['native_context_state']='REPLACEMENT_PENDING'
             return {'thread_id':thread_id,'previous_remote_id':t['remote_id'],'model':t['model'],
-                    'workspace':t['workspace'],'proof_sha256':proof_hash}
+                    'workspace':t['workspace'],'proof_sha256':proof_hash,'reasoning_effort':t['reasoning_effort']}
         def effect(c):
             if admission is not None:admission()
-            self._model(c['model'])
+            row=self._model(c['model'])
+            if c['reasoning_effort'] not in row['supported_reasoning_efforts']:
+                raise PipelineError('REASONING_EFFORT_NOT_SUPPORTED')
             result=self.client.request('thread/start',{'model':c['model'],'cwd':self.policy['workspaces'][c['workspace']],
                 'developerInstructions':self.instructions,'approvalPolicy':'on-request','approvalsReviewer':'user',
-                'sandbox':'read-only','ephemeral':False})
+                'sandbox':'read-only','ephemeral':False,'config':{'model_reasoning_effort':c['reasoning_effort']}})
             if (not opaque(result.get('thread',{}).get('id')) or result['thread']['id']==c['previous_remote_id']
                     or result.get('model')!=c['model'] or result.get('cwd')!=self.policy['workspaces'][c['workspace']]
                     or result.get('modelProvider')!='openai' or result.get('approvalPolicy')!='on-request'
                     or result.get('approvalsReviewer')!='user' or result.get('sandbox',{}).get('type')!='readOnly'):
                 raise PipelineError('REPLACEMENT_SCOPE_MISMATCH','UNKNOWN')
+            self._context_effort(result,c['reasoning_effort'],'thread/start')
             return result
         def finish(s,c,result):
             t=s['threads'][thread_id];remote=result['thread']['id']
@@ -507,7 +667,8 @@ class Pipeline:
                 raise PipelineError('REMOTE_THREAD_COLLISION','UNKNOWN')
             t['native_replacements']=[{'previous_remote_id':c['previous_remote_id'],'remote_id':remote,
                 'reason':'EMPTY_NO_ROLLOUT','proof_sha256':proof_hash,'request_key_hash':digest(request_key)}]
-            t.update(remote_id=remote,native_creation_count=2,native_context_state='READY',history_verified=False)
+            t.update(remote_id=remote,native_creation_count=2,native_context_state='READY',history_verified=False,
+                context_reasoning_effort_evidence=self._context_effort(result,c['reasoning_effort'],'thread/start'))
             self.loaded.add(thread_id)
             self._event(s,'native_context_replaced',thread_id,native_creation_count=2,reason_code='EMPTY_NO_ROLLOUT')
             return {'status':'READY','thread_id':thread_id,'native_creation_count':2}
@@ -528,23 +689,41 @@ class Pipeline:
             self._mutate(preserve)
             raise
 
-    def store(self, thread_id, prompt, request_key, model=None, *, queue=False):
+    def store(self, thread_id, prompt, request_key, model=None, reasoning_effort=None, *, queue=False, dispatch_now=False):
         text(prompt)
+        # Keep historical omitted-input fingerprints intact; explicit effort
+        # is request identity, not a mutable dispatch-time default.
+        args = [thread_id, prompt, model, queue] + ([{'reasoning_effort': reasoning_effort}] if reasoning_effort is not None else [])
+        prior = self._prior_operation(request_key, 'input', args)
+        if prior is not None: return prior
+        thread = self._mutate(lambda s: dict(self._thread(s, thread_id)))
+        chosen = model or thread['model']
+        if chosen not in self.policy['models']: raise PipelineError('MODEL_NOT_ALLOWED')
+        # Explicit intent can be saved offline without claiming entitlement.
+        # Omission, unlike an explicit value, requires a freshly observed default.
+        catalog = self._catalog() if reasoning_effort is None else None
+        selection = self._selection(chosen, reasoning_effort,
+            self._model(chosen, catalog) if catalog is not None else None)
         def prepare(s):
-            t = self._thread(s, thread_id)
-            chosen = model or t['model']
-            if chosen not in self.policy['models']: raise PipelineError('MODEL_NOT_ALLOWED')
+            self._thread(s, thread_id)
             if self.policy['schema'] == 1 and len(s['tasks']) >= self.policy['max_tasks']: raise PipelineError('TASK_CAPACITY')
             ident = str(uuid.uuid4())
-            s['tasks'][ident] = {'id': ident, 'thread_id': thread_id, 'model': chosen, 'prompt': prompt,
+            s['tasks'][ident] = {'id': ident, 'thread_id': thread_id, 'model': chosen, 'prompt': prompt, **selection,
+                'reasoning_effort_evidence': {'turn_parameter': 'effort', 'turn_transport': 'not_sent',
+                    'turn_provider_echo': 'not_available', 'actual_execution_verified': False},
                 'common_policy_sha256': self.common_hash,
                 'prompt_sha256': digest(prompt), 'state': 'QUEUED' if queue else 'STORED', 'remote_turn': None,
                 'deadline': None, 'answer': None, 'answer_truncated': False, 'stop_sent': False,
                 'queue_seq': len(s['events']) if queue else None, 'pending_turn': None, 'pending_approval_turn': None}
             self._event(s, 'input_queued' if queue else 'input_stored', thread_id, ident)
-            return {'task_id': ident}
-        return self._operation(request_key, 'input', [thread_id, prompt, model, queue], prepare, lambda c: c,
+            return {'task_id': ident, 'selection_sha256': selection['selection_sha256']}
+        result = self._operation(request_key, 'input', args, prepare, lambda c: c,
             lambda s, c, _: self._view(self._task(s, c['task_id'])))
+        # Reuse only the immediately preceding fresh read in this synchronous
+        # submit. A delayed FIFO dispatch always rediscovers provider support.
+        if dispatch_now and not result.get('duplicate') and 'id' in result:
+            self._dispatch(catalog=catalog)
+        return result
 
     @staticmethod
     def _view(t):
@@ -555,6 +734,7 @@ class Pipeline:
             task = self._task(s, task_id)
             self._thread(s, task['thread_id'])
             if task['state'] != 'STORED': raise PipelineError('INPUT_NOT_STORED')
+            self._assert_selection(task)
             task['state'] = 'QUEUED'
             task['queue_seq'] = len(s['events'])
             self._event(s, 'input_queued', task['thread_id'], task_id)
@@ -571,7 +751,7 @@ class Pipeline:
             return self._view(current)
         return self._mutate(block)
 
-    def _dispatch(self):
+    def _dispatch(self, *, catalog=None):
         def candidate(s):
             if sum(t['state'] in HELD for t in s['tasks'].values()) >= self.policy['concurrency']: return None
             pending = sorted((t for t in s['tasks'].values() if t['state'] == 'QUEUED'), key=lambda t: t['queue_seq'])
@@ -580,24 +760,18 @@ class Pipeline:
                          and not s['threads'][t['thread_id']]['archived'] and self.room(s, t['thread_id'])), None)
         ident = self._mutate(candidate)
         if not ident: return {'status': 'IDLE_OR_HELD'}
-        if self.admission is not None and not self.admission(): return {'status': 'SHARED_BUDGET_HELD'}
         task = self._mutate(lambda s: dict(self._task(s, ident)))
+        try: self._assert_selection(task)
+        except PipelineError as error: return self._blocked_before_turn(ident, error.code)
+        if self.admission is not None and not self.admission(): return {'status': 'SHARED_BUDGET_HELD'}
         try:self._mutate(lambda s:self._thread(s,task['thread_id'],idle=True))
         except PipelineError as error:return {'status':'BLOCKED','code':error.code,'task_id':ident}
         try:
-            self._model(task['model'])
-        except RpcError:
-            if self.policy['schema'] == 1: raise
-            return self._blocked_before_turn(ident, 'CATALOG_REJECTED')
+            row = self._model(task['model'], catalog)
+            if task['reasoning_effort'] not in row['supported_reasoning_efforts']:
+                raise PipelineError('REASONING_EFFORT_NOT_SUPPORTED')
         except PipelineError as error:
-            if error.code not in ('MODEL_NOT_AVAILABLE_OR_ALLOWED', 'SUBSCRIPTION_AUTH_REQUIRED'): raise
-            def blocked(s):
-                current = self._task(s, ident)
-                if current['state'] == 'QUEUED':
-                    current.update(state='BLOCKED', reason_code=error.code, execution_started=False)
-                    self._event(s, 'task_blocked', current['thread_id'], ident, reason_code=error.code)
-                return self._view(current)
-            return self._mutate(blocked)
+            return self._blocked_before_turn(ident, error.code)
         # app-server restart does not imply a loaded thread. Resume only the
         # exact owned thread, with the same fixed policy; never import by path.
         if task['thread_id'] not in self.loaded:
@@ -606,7 +780,8 @@ class Pipeline:
                 result = self.client.request('thread/resume', {'threadId': thread['remote_id'], 'excludeTurns': True,
                     'model': task['model'], 'cwd': self.policy['workspaces'][thread['workspace']],
                     'developerInstructions': self.instructions, 'approvalPolicy': 'on-request',
-                    'approvalsReviewer': 'user', 'sandbox': 'read-only'})
+                    'approvalsReviewer': 'user', 'sandbox': 'read-only',
+                    'config': {'model_reasoning_effort': task['reasoning_effort']}})
             except RpcError:
                 if self.policy['schema'] == 1: raise
                 return self._blocked_before_turn(ident, 'RESUME_REJECTED')
@@ -625,20 +800,32 @@ class Pipeline:
                                 reason_code='RESUME_SCOPE_MISMATCH')
                     return self._view(current)
                 return self._mutate(block_resume)
+            try:
+                evidence = self._context_effort(result, task['reasoning_effort'], 'thread/resume')
+            except PipelineError:
+                return self._blocked_before_turn(ident, 'RESUME_REASONING_EFFORT_MISMATCH')
+            self._mutate(lambda s:s['threads'][thread['id']].update(context_reasoning_effort_evidence=evidence))
             self.loaded.add(thread['id'])
+        selection_sha256 = task['selection_sha256']
         def prepare(s):
             task = self._task(s, ident)
             thread = self._thread(s, task['thread_id'], idle=True)
             if task['state'] != 'QUEUED': raise PipelineError('NOT_QUEUED')
+            self._assert_selection(task)
+            if task['selection_sha256'] != selection_sha256: raise PipelineError('IMMUTABLE_MODEL_SELECTION_CHANGED')
             if not self.room(s, task['thread_id']): raise PipelineError('CONCURRENCY_HELD')
             task['state'], task['deadline'] = 'DISPATCHING', self.clock() + self.policy['timeout_seconds']
             thread['active_task'] = ident
-            return {'task_id': ident, 'remote_thread': thread['remote_id']}
+            task['reasoning_effort_evidence']['turn_transport'] = 'outcome_unknown'
+            if 'context_reasoning_effort_evidence' in thread:
+                task['context_reasoning_effort_evidence'] = dict(thread['context_reasoning_effort_evidence'])
+            return {'task_id': ident, 'remote_thread': thread['remote_id'], 'selection_sha256': task['selection_sha256']}
         def finish(s, c, result):
             task = self._task(s, ident)
             turn = result['turn']
             if not opaque(turn.get('id')): raise PipelineError('INVALID_TURN', 'UNKNOWN')
             task['remote_turn'] = turn['id']
+            task['reasoning_effort_evidence']['turn_transport'] = 'acknowledged'
             if task['state'] in ('DISPATCHING', 'UNKNOWN'): task['state'] = 'RUNNING'
             pending = task.pop('pending_turn', None)
             if pending and pending.get('id') == turn['id']: self._adopt_turn(s, task, pending)
@@ -650,7 +837,7 @@ class Pipeline:
             return self._view(task)
         return self._operation('dispatch:' + ident, 'dispatch', ident, prepare,
             lambda c: self.client.request('turn/start', {'threadId': c['remote_thread'], 'clientUserMessageId': ident,
-                'model': task['model'], 'input': [{'type': 'text', 'text': task['prompt'], 'text_elements': []}],
+                'model': task['model'], 'effort': task['reasoning_effort'], 'input': [{'type': 'text', 'text': task['prompt'], 'text_elements': []}],
                 'cwd': self.policy['workspaces'][self._mutate(lambda s: self._thread(s, task['thread_id'])['workspace'])],
                 'approvalPolicy': 'on-request', 'approvalsReviewer': 'user', 'sandboxPolicy': {'type': 'readOnly'}}), finish)
 
@@ -917,10 +1104,10 @@ class Pipeline:
             transport.poll(timeout_s=0)
         a = arguments
         if name == 'codex_capabilities': return self.capabilities()
+        if name == 'codex_models_list': return self.models_list(**a)
         if name == 'codex_thread_start': return self.start(**a)
         if name in ('codex_chat_store', 'codex_task_submit'):
-            result = self.store(**a, queue=name == 'codex_task_submit')
-            if name == 'codex_task_submit' and not result.get('duplicate'): self._dispatch()
+            result = self.store(**a, queue=name == 'codex_task_submit', dispatch_now=name == 'codex_task_submit')
             return self._mutate(lambda s: self._view(self._task(s, result['id']))) if 'id' in result else result
         if name == 'codex_chat_queue': return self.queue(**a)
         if name == 'codex_chat_steer': return self.steer(**a)
@@ -941,7 +1128,7 @@ class Pipeline:
 def build_pipeline(runtime, project, *, transport_factory=None):
     """Explicit operator activation only. No caller-supplied command or provider."""
     from common_policy import load_project_policy, developer_instructions
-    from codex_app_protocol import ProtocolClient, StdioTransport
+    from codex_app_protocol import ProtocolClient, StdioTransport, schema_version_supported
     path = Path(runtime) / 'codex-pipeline-policy.json'
     _private(path, 16384)
     policy = validate_policy(_json(path.read_bytes()))
@@ -953,9 +1140,9 @@ def build_pipeline(runtime, project, *, transport_factory=None):
     try:
         transport.start()
         initialized = client.initialize()
-        if not re.search(r'(?<![0-9])0\.165\.0(?![0-9])', initialized['userAgent']):
+        if not schema_version_supported(initialized['userAgent']):
             raise PipelineError('UNVERIFIED_CODEX_VERSION')
-        pipeline.capabilities()  # Verify existing ChatGPT auth; no login/key mutation.
+        pipeline._catalog()  # Verify existing ChatGPT auth; no login/key mutation.
     except BaseException:
         transport.close()
         raise

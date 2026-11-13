@@ -20,6 +20,7 @@ sys.path.insert(0, str(PROJECT / 'src'))
 from codex_pipeline import Pipeline, PipelineError, digest, packed
 import pipeline_policy_migration as migration
 from codex_host import HostGateway
+from test_codex_app_protocol import MODEL
 
 
 class SyntheticClient:
@@ -30,7 +31,7 @@ class SyntheticClient:
     def request(self, method, params):
         self.requests.append((method, params))
         if method == 'account/read': return {'account': {'type': 'chatgpt'}}
-        if method == 'model/list': return {'data': [{'model': 'offline-model'}]}
+        if method == 'model/list': return {'data': [copy.deepcopy(MODEL)], 'nextCursor': None}
         if method == 'thread/start':
             return {'thread': {'id': 'new-synthetic-remote'}, 'model': 'offline-model',
                     'modelProvider': 'openai', 'cwd': self.workspace,

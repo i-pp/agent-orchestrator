@@ -1,3 +1,5 @@
-# 未適用のプロジェクト設定草案。グローバル設定を置換しない。
+# Project-scoped defaults for new trusted sessions only; never a global override.
 [agents]
-max_concurrent_threads_per_session = 2
+max_concurrent_threads_per_session = 6
+default_subagent_model = "gpt-6.1-sol"
+default_subagent_reasoning_effort = "max"

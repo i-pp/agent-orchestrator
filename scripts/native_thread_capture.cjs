@@ -118,11 +118,13 @@ async function local(api, op, body) {
 
 async function prepareReadonly(api) {
   const step = await local(api, 'readonly_prepare', {});
-  if (step.profile !== 'collaboration-parent-v3' || step.tool_calls?.length !== 1
+  if (step.profile !== 'collaboration-parent-v4' || step.tool_calls?.length !== 1
       || step.parent_jobs?.length || step.pending_reconciliation?.length)
     throw Error('SINGLE_FRESH_SPAWN_REQUIRED_NO_REPLAY');
   const call = step.tool_calls[0];
-  if (call.tool !== 'collaboration.spawn_agent' || call.arguments?.fork_turns !== 'none')
+  if (call.tool !== 'collaboration.spawn_agent' || call.arguments?.fork_turns !== 'none'
+      || !['gpt-6.1-sol', 'gpt-6-luna'].includes(call.arguments?.model)
+      || call.arguments?.reasoning_effort !== 'max')
     throw Error('SINGLE_FRESH_SPAWN_REQUIRED_NO_REPLAY');
   // Returned arguments are exactly the fixed short bootstrap. The parent must
   // use its standard tool once; collaboration is unavailable inside Code Mode.

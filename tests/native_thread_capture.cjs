@@ -12,7 +12,7 @@ function fixture() {
     {type:'subAgentActivity',agentPath:path,agentThreadId:childId,kind:'completed'}]}]};
   const child={schemaVersion:1,thread:{id:childId},turns:[{id:turnId,status:'completed',startedAt:1010,
     completedAt:1038,durationMs:27942,error:null,items:[{type:'agentMessage',phase:'final_answer',
-      text:'literal `$()`, quotes " and Japanese 日本語\nNo transcription.'}]}]};
+      text:'literal `$()`, quotes " and Japanese \u65e5\u672c\u8a9e\nNo transcription.'}]}]};
   const calls=[],saved=[]; let time=1100;
   const api={clock:()=>time++,readThread:async args=>{calls.push(args);return args.threadId===parentId?parent:child;},
     saveCapture:async value=>{saved.push(value);return {saved:true};}};
@@ -114,7 +114,7 @@ test('fixed CLI rejects arbitrary operations and uncertain process outcomes with
 test('caller refuses old or pending spawn envelopes rather than retrying',async()=>{
   for(const result of [
     {profile:'collaboration-parent-v2',tool_calls:[],parent_jobs:[]},
-    {profile:'collaboration-parent-v3',tool_calls:[],parent_jobs:[],pending_reconciliation:[{}]}]){
+    {profile:'collaboration-parent-v4',tool_calls:[],parent_jobs:[],pending_reconciliation:[{}]}]){
     let calls=0;
     await assert.rejects(()=>prepareReadonly({runLocalAdapter:async(op)=>{
       calls++;return {status:'OK',operation:op,result};
@@ -131,7 +131,7 @@ test('Code Mode module and fixed CLI use no Node or TextEncoder globals',async()
     calls++;return {exit_code:0,output:JSON.stringify({status:'OK',operation:'step',result:{}})};
   },'/project','/private/run');
   await port('step',{});
-  await assert.rejects(()=>port('step',{body:'日本語'.repeat(8000)}),/SIZE_LIMIT/);
+  await assert.rejects(()=>port('step',{body:'\u65e5\u672c\u8a9e'.repeat(8000)}),/SIZE_LIMIT/);
   assert.equal(calls,1);
 });
 test('live read_thread caller is disabled before any adapter or app read',async()=>{

@@ -7,7 +7,6 @@ import hashlib
 import json
 from pathlib import Path
 import re
-import tomllib
 import shlex
 import math
 
@@ -16,15 +15,16 @@ from native_team import sha
 from chat_mailbox import _json
 from native_team_artifacts import _no_symlinks
 from native_handoff import HandoffStore
+from native_agent_profiles import ROLES as ROLE_PROFILES, MODELS, load_profile
 
-PROFILE = 'collaboration-parent-v3'
+PROFILE = 'collaboration-parent-v4'
 TOOLS = {
-    'collaboration.spawn_agent': {'task_name', 'message', 'fork_turns'},
+    'collaboration.spawn_agent': {'task_name', 'message', 'fork_turns', 'model', 'reasoning_effort'},
     'collaboration.list_agents': {'path_prefix'},
     'collaboration.interrupt_agent': {'target'},
     'collaboration.wait_agent': {'timeout_ms'},
 }
-ROLES = {'Implementer': 'implementer', 'Verifier': 'verifier', 'Researcher': 'researcher'}
+ROLES = {role: profile[0] for role, profile in ROLE_PROFILES.items() if role != 'Coordinator'}
 
 
 class AdapterError(ValueError):
@@ -66,18 +66,14 @@ class NativeParentAdapter:
             if role not in ROLES or spec['registry']['roles'][role].get('native_role') != ROLES[role]:
                 raise AdapterError('UNSUPPORTED_ROLE_PROFILE')
             path = _no_symlinks(Path(spec['project']) / '.codex' / 'agents' / (ROLES[role] + '.toml'))
-            if path.stat().st_size > 65536:
-                raise AdapterError('ROLE_SIZE_LIMIT')
-            raw = path.read_bytes()
-            value = tomllib.loads(raw.decode('utf-8'))
-            # This tool profile has no custom-agent/model/config-file parameter.
-            # Do not silently ignore role settings which this adapter cannot apply.
-            if (set(value) != {'name', 'description', 'developer_instructions'}
-                    or value['name'] != ROLES[role]
-                    or any(not isinstance(v, str) or not v.strip() for v in value.values())):
-                raise AdapterError('UNSUPPORTED_ROLE_SETTINGS')
+            try:
+                raw, value = load_profile(spec['project'], role)
+            except ValueError as error:
+                raise AdapterError(str(error)) from None
             roles[role] = {'sha256': hashlib.sha256(raw).hexdigest(),
-                           'instructions': value['developer_instructions']}
+                           'instructions': value['developer_instructions'],
+                           'model': value['model'],
+                           'reasoning_effort': value['model_reasoning_effort']}
         return bundle, roles
 
     @classmethod
@@ -126,6 +122,9 @@ class NativeParentAdapter:
     def _call(tool, arguments, actions):
         if tool not in TOOLS or set(arguments) != TOOLS[tool]:
             raise AdapterError('TOOL_CONTRACT_MISMATCH')
+        if tool == 'collaboration.spawn_agent' and (arguments['model'] not in MODELS
+                or arguments['reasoning_effort'] != 'max' or arguments['fork_turns'] != 'none'):
+            raise AdapterError('UNSUPPORTED_MODEL_SELECTION')
         return {'tool': tool, 'arguments': arguments, 'action_ids': actions}
 
     def _bound_agent(self, state, action):
@@ -160,6 +159,8 @@ class NativeParentAdapter:
                     'workspace': task['workspace'], 'input_revision': action['input_revision'],
                     'role': task['role'], 'instruction': task['instruction'], 'allowed': task['allowed'],
                     'policy': action['policy'],
+                    'model': roles[task['role']]['model'],
+                    'reasoning_effort': roles[task['role']]['reasoning_effort'],
                     'task_timeout_s': state['spec']['registry']['budgets']['task_timeout_s'],
                 }
                 message = (
@@ -187,7 +188,9 @@ class NativeParentAdapter:
                              'services, credentials or external messages while loading the task. Higher-priority rules apply.')
                 call = self._call('collaboration.spawn_agent', {
                     'task_name': self._name(state, action).rsplit('/', 1)[1],
-                    'message': bootstrap, 'fork_turns': 'none'}, [action['action_id']])
+                    'message': bootstrap, 'fork_turns': 'none',
+                    'model': roles[task['role']]['model'],
+                    'reasoning_effort': roles[task['role']]['reasoning_effort']}, [action['action_id']])
                 call['expected_agent_name'] = self._name(state, action)
                 call['not_after'] = deadline
                 call['context_ref'] = reference

@@ -1,5 +1,7 @@
 # Agent Orchestrator
 
+> This Japanese translation predates the current parallel-agent profile. Use the [canonical English README](README.md) for current features and instructions.
+
 ## 概要
 
 Agent Orchestratorは、Codexの実行と成果の検証、安全に再開できるかの判断を分けて記録するツールです。実行・受入証跡・復旧判断・人のレビューを別々に管理し、不確かな作業を無条件に再実行しないよう支援します。専用workspaceでCodex CLIタスクを扱うPython runnerと任意のuser daemon、ローカルMCP stdioアダプターを提供します。

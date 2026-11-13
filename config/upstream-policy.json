@@ -2,21 +2,21 @@
   "schema_version": 1,
   "repository": "i-pp/ai-orchestration",
   "git_url": "git@github.com:i-pp/ai-orchestration.git",
-  "commit": "394bf5377c2b82bb6f660ca917192bdbe337bc85",
-  "version": "git:394bf5377c2b82bb6f660ca917192bdbe337bc85",
-  "sha256": "e8a458430fb66791300c942d6eb49e967a184989b858ec597b7c0b22541cf0ce",
+  "commit": "346f337c5dcdd1249adadcd1e31123ca02702418",
+  "version": "git:346f337c5dcdd1249adadcd1e31123ca02702418",
+  "sha256": "37aaf0e725713aa6d762d08ffe27c32d3aad0b14ddde9f4ee5303f20fa74a7ed",
   "files": {
     "docs/ai/orchestration.md": {
-      "sha256": "99ec64c46ac77946965b258bf8bcc958e863c920275b54083947f20075cf967a",
-      "git_blob_sha": "b27d0e66daefea0498165c5a23c057ebeafe7bd9"
+      "sha256": "5a163e0c4d03c3c22adce71603b7875813dc9cf31c2ae398ecbca327af6b1356",
+      "git_blob_sha": "686a6bf61d29b0d022052479d7c1a4bebd44e689"
     },
     "docs/ai/policies.md": {
       "sha256": "1fc173e2c7826106ae4baec5bfe851d77088fd7841e2e9099554aec388275b18",
       "git_blob_sha": "0554d18499161015185e7f6fe821fd0ce4a5175d"
     },
     "agents/README.md": {
-      "sha256": "1e11f54a48b957a9020638fe829b9ec40800552c6ce09f3b8dab510901cbfa71",
-      "git_blob_sha": "1a8431d98cde65efa622af3af1f3a0b406d1cee2"
+      "sha256": "41ac2dd6d45269b344733b82739e856abab395f5456ea7fd952d3c8bdbc0e13d",
+      "git_blob_sha": "f1ee0a5070a3df2e2dfc4a1a5c913467d7187f21"
     },
     "docs/ai/editorial-policy.md": {
       "sha256": "c63d2c316a9e8950c13dc7dfbe1c86776b1afbdadad83cd3a4c9680320f834e1",

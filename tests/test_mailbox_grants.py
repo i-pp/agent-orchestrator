@@ -153,7 +153,7 @@ class GrantTests(unittest.TestCase):
         self.assertEqual(self.box.dispatch(TOOLS[1],KEY)['status'],'NOT_FOUND')
 
     def test_utf8_bounds_and_corruption_fail_closed(self):
-        for text in ['x'*4097,'あ'*1366,'\ud800']:
+        for text in ['x'*4097,'\u3042'*1366,'\ud800']:
             with self.subTest(size=len(text)),self.assertRaises(MailboxError):
                 self.box.dispatch(TOOLS[0],{**KEY,'request':text})
         self.request();self.answer()

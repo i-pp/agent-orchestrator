@@ -16,5 +16,5 @@ The daemon and the MCP adapter both default to pipeline disabled. To expose the 
 ## Review constraints and incomplete coverage
 
 - The common-policy loader requires a separately managed, existing local checkout at the pinned relative path or a valid operator-local override. That ignored local override is intentionally excluded from this patch; the draft cannot start a real HostGateway in an environment without the required checkout.
-- The canonical `tests/test_codex_pipeline.py` Peer fixture is absent from the source tree and Git history. This draft adds explicitly synthetic tests and does not recreate that fixture. Existing capacity, parallel, migration, absence, and gateway suites that import it are not included as runnable tests.
+- At the original extraction baseline, the canonical `tests/test_codex_pipeline.py` Peer fixture was not included. The earlier statement that it was absent from Git history was incorrect: it is recoverable from pipeline branch commit `c62d97f056e0eb3e1906ef5b1c114d5a11ba66d4`. The [2026-11-13 reconciliation](branch-reconciliation.md) restores compatible complete fake-peer tests and records which older service/login assertions remain unimplemented. Synthetic/offline passes are not live deployment evidence.
 - Service startup, real Codex turns, TCP/network calls, and external notifications are not tested here.
