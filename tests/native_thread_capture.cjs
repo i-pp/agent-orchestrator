@@ -12,7 +12,7 @@ function fixture() {
     {type:'subAgentActivity',agentPath:path,agentThreadId:childId,kind:'completed'}]}]};
   const child={schemaVersion:1,thread:{id:childId},turns:[{id:turnId,status:'completed',startedAt:1010,
     completedAt:1038,durationMs:27942,error:null,items:[{type:'agentMessage',phase:'final_answer',
-      text:'literal `$()`, quotes " and Japanese 日本語\nNo transcription.'}]}]};
+      text:'literal `$()`, quotes " and Japanese \u65e5\u672c\u8a9e\nNo transcription.'}]}]};
   const calls=[],saved=[]; let time=1100;
   const api={clock:()=>time++,readThread:async args=>{calls.push(args);return args.threadId===parentId?parent:child;},
     saveCapture:async value=>{saved.push(value);return {saved:true};}};
@@ -114,7 +114,7 @@ test('fixed CLI rejects arbitrary operations and uncertain process outcomes with
 test('caller refuses old or pending spawn envelopes rather than retrying',async()=>{
   for(const result of [
     {profile:'collaboration-parent-v2',tool_calls:[],parent_jobs:[]},
-    {profile:'collaboration-parent-v3',tool_calls:[],parent_jobs:[],pending_reconciliation:[{}]}]){
+    {profile:'collaboration-parent-v4',tool_calls:[],parent_jobs:[],pending_reconciliation:[{}]}]){
     let calls=0;
     await assert.rejects(()=>prepareReadonly({runLocalAdapter:async(op)=>{
       calls++;return {status:'OK',operation:op,result};
@@ -131,7 +131,7 @@ test('Code Mode module and fixed CLI use no Node or TextEncoder globals',async()
     calls++;return {exit_code:0,output:JSON.stringify({status:'OK',operation:'step',result:{}})};
   },'/project','/private/run');
   await port('step',{});
-  await assert.rejects(()=>port('step',{body:'日本語'.repeat(8000)}),/SIZE_LIMIT/);
+  await assert.rejects(()=>port('step',{body:'\u65e5\u672c\u8a9e'.repeat(8000)}),/SIZE_LIMIT/);
   assert.equal(calls,1);
 });
 test('live read_thread caller is disabled before any adapter or app read',async()=>{
@@ -150,4 +150,34 @@ test('parent standard return ingress preserves the supplied value without claimi
   assert.equal(received[0].body.result,result);
   assert.equal(received[0].body.request_ref,ref);
   assert.equal(receipt.automatic_tool_execution,false);
+});
+
+// Every supported pair must survive the post-admission transport unchanged.
+test('read-only preparation preserves all supported model-effort pairs',async()=>{
+  const pairs={
+    'gpt-6.1-sol':['low','medium','high','xhigh','max','ultra'],
+    'gpt-6-luna':['low','medium','high','xhigh','max'],
+  };
+  for(const [model,efforts] of Object.entries(pairs)) for(const reasoning_effort of efforts){
+    const args={fork_turns:'none',model,reasoning_effort,task_name:'research',message:'fixed'};
+    let calls=0;
+    const result=await prepareReadonly({runLocalAdapter:async op=>{
+      calls++;return {status:'OK',operation:op,result:{profile:'collaboration-parent-v4',
+        tool_calls:[{tool:'collaboration.spawn_agent',arguments:args}],parent_jobs:[],pending_reconciliation:[]}};
+    }});
+    assert.equal(result.arguments,args);
+    assert.equal(calls,1);
+  }
+});
+test('read-only preparation rejects invalid pairs without replay',async()=>{
+  for(const [model,reasoning_effort] of [['gpt-6-luna','ultra'],['gpt-6.1-sol','unknown'],
+    ['unknown','max'],['gpt-6.1-sol',null],['gpt-6-luna',undefined]]){
+    let calls=0;
+    await assert.rejects(()=>prepareReadonly({runLocalAdapter:async op=>{
+      calls++;return {status:'OK',operation:op,result:{profile:'collaboration-parent-v4',
+        tool_calls:[{tool:'collaboration.spawn_agent',arguments:{fork_turns:'none',model,reasoning_effort}}],
+        parent_jobs:[],pending_reconciliation:[]}};
+    }}),/NO_REPLAY/);
+    assert.equal(calls,1);
+  }
 });

@@ -1,94 +1,59 @@
-# 並列実行・永続化・復旧 — Phase 2-C
+# Concurrency, Persistence, and Recovery
 
-## 前景実行と上限
+This reference describes the Phase 2-C execution contract and its D1 resource extension. Historical observations remain scoped to the [C report](phase2-c-report.md) and [D1 report](phase2-d1-report.md). The [Japanese historical source](concurrency-design_jp.md) is unchanged.
 
-1 taskは1 worker、1 workerは同時に1つの専用App Server stdioを使う。接続・JSONL・監視・解放は共有しない。
-`run-pair`は2件を起動して待つだけで、daemon・バックグラウンドschedulerではない。
-別々に起動した`run`にも同じlease制御を適用する。
-上限は**同じruntimeの2セッション**。別runtimeや外部から直接起動したCodexの数は制御しない。
+## Foreground execution and limits
 
-| lease | isolated | 旧共有workspaceモード |
+One task has one worker and at most one dedicated App Server stdio connection at a time. Connections, JSONL, monitoring, and cleanup are not shared. `run-pair` starts two tasks and waits; it is not a daemon or background scheduler. Independently started `run` commands use the same leases.
+
+The limit is **two sessions in the same runtime**. It does not count other runtimes or directly launched Codex processes.
+
+| Lease | Isolated mode | Legacy shared workspace |
 | --- | --- | --- |
-| runner.lock | shared | exclusive |
-| task UUID | exclusive | 全体lockで直列 |
-| workspace UUID | exclusive | 全体lockで直列 |
-| slot-0 / slot-1 | 空いている1つ | 全体exclusiveにより他実行を排除 |
+| `runner.lock` | Shared | Exclusive |
+| Task UUID | Exclusive | Serialized by the global lock |
+| Workspace UUID | Exclusive | Serialized by the global lock |
+| `slot-0` / `slot-1` | One available slot | Global exclusivity excludes other execution |
 
-flockはnonblocking。競合時にモデルを起動せず、タスクはQUEUEDのまま返す。自動再試行しない。
-順序はadmission→task→workspace→slotで固定し、FDはclose-on-exec。worker死亡でleaseを解放する。
-resumeは同じworkspace leaseを使うため、同一threadの同時resumeも拒否する。
-履歴照合probeを終了してから実行serverを開き、一時的にserverを二重にしない。
+Nonblocking `flock` contention leaves a task `QUEUED` without starting a model or automatically retrying. Acquisition order is admission, task, workspace, slot; FDs are close-on-exec. Worker death releases leases. Resume takes the original workspace lease, rejecting concurrent resume of the same thread. History probes finish before an execution server opens.
 
-## ID・イベント・結果
+## IDs, events, and cancellation
 
-task、execution、thread、turnに加え、workspaceとsnapshotを独立IDとして保存する。
-各実行ログにtask/execution/workspace/role/snapshotを付け、thread確定後はthreadも付ける。
-通知のthreadと結果を生んだturnを検査し、他セッションの結果は使用しない。
-resume時に届く既知の過去turnの利用量通知だけは、historical_usage_ignoredとして記録し、現在turnのusageへ混ぜない。
-未知turnや別thread、別turnのitem/completedは従来どおりProtocolErrorとする。
+Task, execution, thread, turn, workspace, and snapshot have separate IDs. Logs include task/execution/workspace/role/snapshot and add thread once known. Notifications must match the expected thread and producing turn. Known historical usage notifications received during resume are recorded as `historical_usage_ignored`, not charged to the current turn. Unknown turns, foreign threads, and mismatched `item/completed` remain protocol errors.
 
-一方の失敗・タイムアウト・cancelは自身のProcess群だけを解放する。
-個別cancel、runtime全体のcancel-all、run-pair自身への停止要求を区別する。
-cancel-allはBEGIN IMMEDIATE内で対象集合を確定し、QUEUEDをCANCELLED、実行中をcancel_requestedへ更新する。
-run-pairのSIGINT/SIGTERMはその2件のみへ要求を送る。SIGKILLでは親死亡guardがworkerとその子へ伝播する。
-副作用の巻戻しやキャンセル時点以前の書込み消失は保証しない。
+A failure, timeout, or cancellation cleans up only that task's process group. Individual cancellation, runtime-wide `cancel-all`, and stopping `run-pair` are distinct. `cancel-all` fixes its target set inside `BEGIN IMMEDIATE`, cancels queued work, and marks running work `cancel_requested`. `run-pair` SIGINT/SIGTERM targets only its two tasks; SIGKILL relies on the parent-death guard. Cancellation does not roll back prior writes or side effects.
 
-## SQLiteと移行
+## SQLite and migration
 
-標準sqlite3、接続ごとのforeign_keys=ON、synchronous=FULL、timeout=5秒を維持する。
-WAL等の新しい運用設定は追加しない。短いトランザクションとCAS／一意制約で同時更新を守る。
-claimはQUEUEDを条件とするUPDATEとexecution挿入を一体化する。executions.task_idのUNIQUEも維持する。
-request_keyの同時投入はBEGIN IMMEDIATEで直列化し、同一入力なら同じtask/workspaceを返す。
+Use standard `sqlite3`, per-connection `foreign_keys=ON`, `synchronous=FULL`, and a five-second timeout. Short transactions, conditional updates, and unique constraints protect concurrency; no new WAL configuration is introduced. Claim atomically updates `QUEUED` and inserts the execution. `executions.task_id` remains unique. Concurrent submission of the same `request_key` is serialized with `BEGIN IMMEDIATE`; identical input returns the same task/workspace.
 
-schema v3の追加:
-
-| 表 | 追加・内容 |
+| Schema-v3 table | Added data |
 | --- | --- |
-| tasks | workspace_id、role、access、snapshot_id、workspace_request |
-| executions | workspace_id、role、access、snapshot_id |
-| workspaces | id、owner_task_id、access、state、snapshot_id、initial_fingerprint、created、released |
-| snapshots | id、source_task_id、source_execution_id、workspace_id、fingerprint、created |
+| `tasks` | `workspace_id`, `role`, `access`, `snapshot_id`, `workspace_request` |
+| `executions` | `workspace_id`, `role`, `access`, `snapshot_id` |
+| `workspaces` | ID, owner task, access, state, snapshot, initial fingerprint, creation/release time |
+| `snapshots` | ID, source task/execution, workspace, fingerprint, creation time |
 
-旧行のworkspace_id/snapshot_idはNULL、role=implementer、access=read-only。旧workspaceと保存履歴の場所は変えない。
-旧COMPLETEDや受入根拠・判断・IDを保持する。新しい成果物の成功を推測して追加しない。
-v0は既存v2移行後にv3へ、v2は追加列・表のみのトランザクションでv3へ移す。
-移行前にruntime排他とSQLite backupを取り、foreign_key_checkしてcommitする。途中失敗はschemaを含めrollbackする。
-v2の独自列が追加名と競合する場合はエラーで止め、既存列を上書きしない。
+Legacy rows retain null workspace/snapshot IDs, `role=implementer`, and `access=read-only`. Existing workspace locations, history, completed states, evidence, decisions, and IDs are preserved; no new success evidence is invented. Version 0 passes through the existing v2 migration; v2 receives additive columns/tables transactionally. Take a runtime-exclusive lease and SQLite backup, run `foreign_key_check`, then commit. Failure rolls back the schema too; conflicting custom columns are rejected rather than overwritten.
+
+Rollback requires all workers/clients stopped and a verified backup filename:
 
 ```bash
-# 全worker／クライアントを止め、バックアップ名を確認して実行
-python3 src/runner.py --runtime .runtime/<runtime> db-rollback <phase2-ab-backup.sqlite>
+python3 src/runner.py --runtime "$STATE_DIR" db-rollback "$BACKUP_FILENAME"
 ```
 
-v3→v2はworkspace/snapshotレコードがなく、旧全表の旧列・全行がbackupと一致する場合だけ許可する。
-現DBも退避する。変更を捨てる強制復元はない。v0への既存rollbackも保持する。
-新コードで開くと再移行するので、旧コードへ戻す場合はコード退避もレビューして戻す。
-今回の開始時ソース退避は`.runtime/phase2-c-evidence/phase2-ab-source-backup.tar.gz`。
-workspace利用後は過去DBへ戻さず、現DBの保全と前進修正を選ぶ。
+A v3-to-v2 rollback is allowed only before workspace/snapshot records exist and when every legacy column/row matches the backup. Preserve the current DB as well. There is no force-restore that discards changes. New code remigrates the restored DB, so reverting code requires a separately reviewed source restore. The original C experiment preserved its prior source under `.runtime/phase2-c-evidence/phase2-ab-source-backup.tar.gz`; that is an evidence identifier, not a portable installed file. After workspace use, preserve state and fix forward.
 
-## 復旧と受入検証
+## Recovery and acceptance
 
-起動時はRUNNING/VERIFYINGを列挙し、タスクとworkspaceのleaseを取得できたものだけUNKNOWNにする。
-生きている他workerのRUNNINGを変更しない。UNKNOWNを起動しない。PID/start/bootと起動checkpointの既存照合を保持する。
-照合・明示判断・snapshot・releaseもworkspace leaseを取るため、実行中の別resumeと競合しない。
-reconcileは対象workspaceのmanifestとそのCODEX_HOME内の公式thread/read・thread/turns/listだけを確認する。
-Codex内部DB、既存daemon、IPCは直接操作しない。
+Startup changes `RUNNING`/`VERIFYING` to `UNKNOWN` only after acquiring the task and workspace leases. Live workers are untouched. `UNKNOWN` never starts automatically. Reconciliation, explicit decisions, snapshots, and release take the same workspace lease as resume.
 
-再開許可と新task投入は別操作。最新turn、資源、副作用、許可fingerprintを再照合する。
-workspace-writeで変更があれば、従来同様に副作用の明示確認が必要。
-受入検証は同じ所有workspaceへ限定し、Codex実行成功とタスク成功を分けたまま維持する。
-Reviewerの検証はsnapshotの独立コピーを使い、sourceの判断は変更しない。
+Reconciliation inspects that workspace's manifest and official `thread/read` / `thread/turns/list` through its own Codex home. It does not edit Codex databases, use an existing daemon, or access existing IPC. Resume permission and a new submission are separate; immediately before execution, recheck latest turn, resources, side effects, and the approved fingerprint. Workspace-write changes require explicit side-effect acknowledgement. Acceptance remains limited to the owned workspace; a reviewer verifies an independent snapshot copy and does not change the source task's decision.
 
-## 実測と未検証
+## Evidence and later additions
 
-2 worker、3件目拒否、同一task排他、request_key同時投入、片方だけの停止、親／coordinator SIGKILLを専用fixtureで検証する。
-実Codexでは2つのworkspace-write、独立review、同一session resume、片方のtimeout／cancelと他方の完了を検証した。
-詳細・初回失敗・利用量は[実施報告](phase2-c-report.md)を参照。
-高負荷・多ホスト・共有ネットワークFS・OS再起動・停電は未検証。2を超える並列、daemon、外部接続は実装対象外。
+Dedicated fixtures covered two workers, rejection of a third, task exclusion, concurrent request keys, stopping one worker, and parent/coordinator SIGKILL. The C report records real-Codex workspace-write, independent review, same-session resume, and one task timing out/cancelling while the other completed. These are historical results, not new checks run during translation.
 
-## Phase 2-D1の追加
+D1 added private scopes for Codex trees, probes, and verifiers without increasing the two-session limit. The coordinator passes only executable-search PATH and LANG and retains installed-binary validation. Historical coordinator-SIGKILL evidence respects live owners until parent-death cleanup and lease release finish, then recovery records `UNKNOWN`.
 
-Codex process tree・probe・verifierは専用user scopeで制限する。モデルsession数の上限2はそのまま。
-coordinatorはworkerへ実行ファイル探索用PATHとLANGだけを渡し、正規バイナリの検査を維持する。
-実Codexのcoordinator SIGKILLを専用fixtureで確認した。親死亡とlease解放が完了するまでlive ownerを尊重し、その後recoverでUNKNOWNへ移す。
-詳細は[資源制限](resource-limits.md)と[D1報告](phase2-d1-report.md)を参照。
+High load, multiple hosts, network filesystems, OS restart, power loss, and other environments were not verified by these phases. Later daemon work is documented separately.

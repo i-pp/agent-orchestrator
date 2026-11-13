@@ -32,7 +32,7 @@ class LocalLlmMcpTests(unittest.TestCase):
         self.assertFalse(self.adapter.tools[-1]['annotations']['readOnlyHint'])
         self.assertFalse(self.adapter.tools[-1]['annotations']['idempotentHint'])
     def test_invalid_arguments_do_not_launch_helper(self):
-        for args in [dict(task='review',prompt='x',model='other'),dict(task='review',prompt='x',max_tokens=True),dict(task='review',prompt='x',max_tokens=1025),dict(task='review',prompt='あ'*6000),dict(task='exec',prompt='x')]:
+        for args in [dict(task='review',prompt='x',model='other'),dict(task='review',prompt='x',max_tokens=True),dict(task='review',prompt='x',max_tokens=1025),dict(task='review',prompt='\u3042'*6000),dict(task='exec',prompt='x')]:
             with patch.object(mcp.subprocess,'run') as run:
                 with self.assertRaises(mcp.Invalid):self.adapter.call_tool('aceis_local_llm_generate',args,1)
                 run.assert_not_called()

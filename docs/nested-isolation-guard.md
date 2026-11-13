@@ -1,15 +1,27 @@
-# 追加隔離作成の起動前ガード
+# Pre-launch Guard Against Nested Isolation
 
-Codexの隔離環境からさらに隔離環境を作成しない（2026-10-29の追加運用制約）。共通ポリシーv1.0の本文は変更しない。
+Do not create another isolation layer from inside an isolated Codex environment. This operational constraint was added on 2026-10-29; it does not modify the hash-pinned legacy policy body. The [Japanese historical source](nested-isolation-guard_jp.md) is unchanged.
 
-`src/isolation_guard.py`は読み取りだけでprocfsを観測する。既知のbwrap profile、sandbox PID1、追加のPID/user namespaceの証拠を`SANDBOXED`、限定的なホスト観測の一致を`HOST_CONTEXT`、不足・未知のprofile等を`UNKNOWN`とする。HOST_CONTEXTは権限や実行成功を保証しない。sysctlの値では可否を決めず、設定を変更しない。user namespaceだけではCodex起動元や権限不足とは断定できない。
+## Detection and enforcement
 
-コードによる拒否は、既存の`isolation.launch`/`isolated_launch`（preflight・version・identityを含む）、`verification_launch`、`development_poc.launch`、および`transport.Process`へ直接渡されるbwrap/unshare/nsjail/firejailに適用する。隔離作成を宣言する入口で、引数の構築や認証マウント準備、Process/Popenより前に検査する。既知の隔離では`NESTED_ISOLATION_FORBIDDEN`、判定不能では`ISOLATION_CONTEXT_UNKNOWN`で拒否し、実行を試して判定しない。回避用の設定や環境変数は設けない。
+`src/isolation_guard.py` reads procfs without changing settings:
 
-拒否されたtaskは既存の`WAITING_FOR_HUMAN`、該当するcodex/verification statusは`BLOCKED`にする。error/evidenceに`status=BLOCKED`、`reason_code`、`executed=false`、`quality_verdict=UNASSESSED`を保存する。実装済みのCodex応答後に検証だけ拒否された場合、codex_statusはSUCCEEDEDを保持する。検証項目のpassedはnull、全体all_passedはfalse（受入未成立）であり、品質FAILではない。隔離なしのfallbackも自動再実行もない。通常の人間レビューで未実行をPASSにすることもできない。再開には適切な通常実行環境と明示的な新しい実行判断が必要になる。
+- `SANDBOXED`: known bwrap profiles, sandbox PID 1, or evidence of additional PID/user namespaces.
+- `HOST_CONTEXT`: a limited set of matching host observations. This is not permission or proof that execution will succeed.
+- `UNKNOWN`: missing evidence or an unknown profile. A user namespace alone does not identify Codex or prove a permission failure. Sysctl values are not used as an execution-eligibility shortcut.
 
-readonly MCPはBLOCKEDと固定の理由コードのみ公開する。MCP権限・ツール追加・書込み公開はない。CLI/DBの詳細には観測理由を残す。既存daemonは自動再起動せず、起動済みプロセスが新しいPythonコードを読むには通常の次回起動が必要。
+The guard applies to `isolation.launch`, `isolated_launch` (including preflight/version/identity), `verification_launch`, `development_poc.launch`, and direct bwrap/unshare/nsjail/firejail commands passed to `transport.Process`. Declared isolation entry points check before argument construction, authentication-mount preparation, or process creation. Known isolation is rejected with `NESTED_ISOLATION_FORBIDDEN`; unknown context with `ISOLATION_CONTEXT_UNKNOWN`. The implementation does not launch a probe to decide, and has no bypass setting or environment variable.
 
-範囲外: このガードはOS sandbox、任意のshellプログラムの解析、モデル内部toolの全コマンド監視、別アプリや別repoのlauncher制御ではない。独自launcher内の任意のラッパーや子孫processを完全に制御するものではない。Codexへの禁止指示も固定developerInstructionsとAGENTSへ追加するが、その部分は運用規約である。既存B4等の外部評価launcherへコードを適用したとは主張しない。そこでも隔離必須評価は未実行・BLOCKEDで保留する。
+## Recorded outcome
 
-ファイル検査・静的検査・追加隔離なしの通常の単体テストは継続可能。namespace統合試験はこの環境から再試行しない。新しいガードの試験はmock/単体試験とfake peerを使い、実モデル、認証、namespace操作を実行しない。
+A refused task uses `WAITING_FOR_HUMAN`; the affected Codex or verification status is `BLOCKED`. Error/evidence records contain `status=BLOCKED`, `reason_code`, `executed=false`, and `quality_verdict=UNASSESSED`. If Codex already succeeded but only verification is blocked, preserve `codex_status=SUCCEEDED`.
+
+Individual verification `passed` values are null; `all_passed=false` means acceptance is not established, not that model quality failed. There is no unisolated fallback or automatic rerun. Ordinary human review cannot turn an unexecuted mandatory check into a pass. Resumption needs a suitable execution context and an explicit new execution decision.
+
+Read-only MCP exposes only `BLOCKED` and a fixed reason code; CLI/DB evidence retains diagnostic reasons. No extra MCP permissions, tools, or write exposure are added. Existing daemons are not restarted automatically; already-running Python processes need their normal next start to load new code.
+
+## Scope and safe checks
+
+This is not an OS sandbox, a parser for arbitrary shell programs, comprehensive monitoring of a model's internal tools, or control over another application's launchers. Arbitrary wrappers and descendants are not fully controlled. Fixed developer instructions and AGENTS also state the rule, but that part is operational guidance rather than enforcement. Existing external evaluation launchers were not patched by this guard; isolation-required evaluations remain unexecuted and blocked where the boundary is unavailable.
+
+File inspection, static checks, and ordinary unit tests that do not add isolation can continue. Do not retry namespace integration tests from the forbidden context. Guard tests use mocks and fake peers without real models, authentication, or namespace operations.

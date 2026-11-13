@@ -65,7 +65,7 @@ class MailboxTests(unittest.TestCase):
         with self.assertRaisesRegex(MailboxError,'REQUEST_NOT_FOUND'):self.answer()
 
     def test_utf8_size_bounds_and_surrogates(self):
-        for text in ['x'*(MAX_TEXT_BYTES+1),'あ'*(MAX_TEXT_BYTES//3+1),'\ud800']:
+        for text in ['x'*(MAX_TEXT_BYTES+1),'\u3042'*(MAX_TEXT_BYTES//3+1),'\ud800']:
             with self.subTest(size=len(text)),self.assertRaises(MailboxError):
                 self.box.dispatch(TOOLS[0],{**KEY,'request':text})
 

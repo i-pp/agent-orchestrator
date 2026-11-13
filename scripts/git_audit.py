@@ -20,7 +20,15 @@ PORTABLE_CONFIG_FILES = {
     ".codex/agents/verifier.toml",
     ".codex/agents/researcher.toml",
     ".codex/agents/independent_reviewer.toml",
+    ".codex/agents/documentation_reviewer.toml",
+    ".codex/agents/implementer_advanced.toml",
+    ".codex/agents/implementer_quick.toml",
+    ".codex/agents/orchestrator.toml",
+    ".codex/agents/performance_reviewer.toml",
+    ".codex/agents/security_reviewer.toml",
+    ".codex/agents/test_reviewer.toml",
     "config/codex-pipeline.concurrent.example.json",
+    "config/native-team.json",
     "config/policy.json",
     "config/upstream-policy.json",
     "policies.md",
@@ -28,6 +36,26 @@ PORTABLE_CONFIG_FILES = {
     "policies/orchestration.md",
     "policies/decision-making.md",
     "policies/escalation.md",
+}
+# Reviewed public repository metadata/CI/integration source, never a broad
+# .github or integrations/ allowance. Unknown and operator-local paths still fail.
+PUBLIC_REPOSITORY_FILES = {
+    '.github/license-policy.json',
+    '.github/workflows/codex-approvals-ci.yml',
+    '.github/workflows/common-policy-ci.yml',
+    '.github/workflows/desktop-notifications-ci.yml',
+    '.github/workflows/documentation-ci.yml',
+    '.github/workflows/mcp-events-ci.yml',
+    '.github/workflows/minimum-ci.yml',
+    '.github/workflows/native-team-ci.yml',
+    '.github/workflows/pipeline-regression-ci.yml',
+    '.github/workflows/sites-approval-ci.yml',
+    '.markdownlint-cli2.jsonc', 'LICENSE', 'NOTICE', 'README_jp.md',
+    'integrations/sites-approval/README.md',
+    'integrations/sites-approval/schema.sql',
+    'integrations/sites-approval/service.mjs',
+    'integrations/sites-approval/service.test.mjs',
+    'integrations/sites-approval/worker.mjs',
 }
 LOCAL_ONLY_FILES = {
     "systemd/aceis-mcp-tunnel.service",
@@ -65,7 +93,7 @@ def path_allowed(path):
         r"|(?:\.local|\.private)(?:[./]|$)|(?:\.env|\.swp|\.swo|\.code-workspace|~)$", sensitive_path)
     if sensitive:
         return False
-    return portable or path in ROOT_FILES or env_example or parts[0] in SOURCE_ROOTS
+    return portable or path in PUBLIC_REPOSITORY_FILES or path in ROOT_FILES or env_example or parts[0] in SOURCE_ROOTS
 
 
 def audit(root):

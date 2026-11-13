@@ -34,6 +34,7 @@ class NativeTeamTests(unittest.TestCase):
         self.spec={'schema':1,'goal':'bounded requirement checks','requirements':['durable admission','independent worktrees'],
             'project':str(self.project),'policy':POLICY.copy(),'registry':registry(),
             'tasks':[self.task('a'),self.task('b'),self.task('third'),self.task('merge',['a','b'])]}
+        self.spec['registry']['budgets']['cloud_concurrency']=2
         self.team=NativeTeam.create(self.root/'run',self.spec,clock=lambda:self.clock[0])
     @staticmethod
     def git(path,*args):
@@ -67,7 +68,7 @@ class NativeTeamTests(unittest.TestCase):
         variants=[]
         cyclic=deepcopy(self.spec);cyclic['tasks'][0]['deps']=['merge'];variants.append(cyclic)
         bad=deepcopy(self.spec);bad['tasks'][0]['deps']=['absent'];variants.append(bad)
-        budget=deepcopy(self.spec);budget['registry']['budgets']['cloud_concurrency']=3;variants.append(budget)
+        budget=deepcopy(self.spec);budget['registry']['budgets']['cloud_concurrency']=7;variants.append(budget)
         for i,spec in enumerate(variants):
             with self.subTest(i=i),self.assertRaises(ValueError):NativeTeam.create(self.root/('bad-'+str(i)),spec)
     def test_two_slots_and_same_workspace_rejection(self):

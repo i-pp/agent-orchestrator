@@ -601,7 +601,7 @@ class HostGateway:
 
     def dispatch(self, tool, arguments):
         validate_arguments(tool, arguments)
-        remote = tool in ('codex_capabilities', 'codex_thread_start', 'codex_chat_steer', 'codex_thread_archive')
+        remote = tool in ('codex_capabilities', 'codex_models_list', 'codex_thread_start', 'codex_chat_steer', 'codex_thread_archive')
         result = None
         if remote and not self.reserve(): raise PipelineError('SHARED_BUDGET_HELD')
         try:

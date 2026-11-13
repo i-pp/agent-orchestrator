@@ -1,98 +1,60 @@
-# Phase 1-A 実行方式比較
+# CLI versus App Server: Phase 1-A Comparison
 
-パスは[表記規約](path-conventions.md)の疑似パスです。シェル例は同ページの変数を設定してから使用します。原本ログは変更していません。
+This is an English account of the **2026-10-28 historical experiment**, not a current benchmark or installation claim. The [Japanese source](runtime-comparison_jp.md) is unchanged. Paths follow [placeholder conventions](path-conventions.md).
 
-実施日: 2026-10-28、Asia/Tokyo。実機はUbuntu 26.04.1 LTS / Python 3.14.4。
-検証時のバイナリの場所は `<CODEX_BINARY>`、versionは `codex-cli 0.164.0-alpha.11.1`。
+The host was Ubuntu 26.04.1 LTS, Python 3.14.4, and `codex-cli 0.164.0-alpha.11.1` at `<CODEX_BINARY>`. Both methods used the same read-only fixture/prompt, dedicated Codex home, and read-only existing ChatGPT authentication mount, not API keys, metered APIs, or existing daemons.
 
-## 条件と根拠
+## Method and schema evidence
 
-- 既存ChatGPT認証をread-only mountし、専用CODEX_HOMEを使用した。APIキー、従量課金API、既存daemonは使っていない。
-- 両方式とも同じread-only設定、同じ`fixture.txt`、同じプロンプトを使用した。
-- 最初のタスクはファイルの`CERULEAN-17`とnonce `ORCH-CONTINUITY-49`を返すもの。再開時はnonceを入力に再掲せず、前ターンの値を返すものとした。
-- CLIのstdinはプロンプト引数があっても追加コンテキストとして読まれるため、直ちにEOFを送った。
-- App Serverは毎回新規stdio子プロセスを起動し、再開実験では前プロセス終了後に保存threadをresumeした。
-- 時間はプロセス起動から解放までの単発観測。統計的ベンチマークや将来の速度保証ではない。
+The first task returned fixture marker `CERULEAN-17` and nonce `ORCH-CONTINUITY-49`. Resume requested the previous nonce without restating it. CLI stdin was closed immediately because it reads extra context even with a prompt argument. Each App Server connection was a fresh stdio process; resume occurred after the prior process exited.
 
-公式仕様は[非対話実行](https://developers.openai.com/codex/noninteractive)、[App Server](https://developers.openai.com/codex/app-server)、[設定参照](https://learn.chatgpt.com/docs/config-file/config-reference)を参照した。
-インストール済みバイナリから`app-server generate-json-schema`を実行し、320件のschemaを取得した。
-thread/start、thread/resume、thread/read、turn/start、turn/interrupt、thread/unsubscribeの必須・任意フィールドを実装と照合した。
-`--experimental`と`experimentalApi=true`は使用していない。App Serverコマンド自体およびalpha版である点の不安定性は残る。
-スキーマと照合結果は `.runtime/schema/`、`.runtime/evidence/schema-check.json`。
+Timings span process launch through cleanup and are single observations, not statistical or future-speed guarantees. The phase checked [noninteractive CLI](https://developers.openai.com/codex/noninteractive), [App Server](https://developers.openai.com/codex/app-server), and [configuration](https://learn.chatgpt.com/docs/config-file/config-reference), and generated 320 schemas from the installed binary. Required/optional fields for thread/start/resume/read, turn/start/interrupt, and thread/unsubscribe were compared with implementation. Experimental flags were not used, but alpha/App Server instability remained. Schema evidence was under `.runtime/schema/` and `.runtime/evidence/schema-check.json`, not portable files included here.
 
-## 同じタスクでの観測結果
+## Normal and resume observations
 
-| 項目 | CLI exec | App Server stdio |
+| Measure | CLI exec | App Server stdio |
 | --- | --- | --- |
-| 通常タスク時間 | 6.278秒 | 6.741秒 |
-| 再開タスク時間 | 3.853秒 | 3.908秒 |
-| 結果 | マーカーとnonceが一致 | マーカーとnonceが一致 |
-| セッションID | thread.startedから取得 | thread/start応答から取得 |
-| 再開 | exec resume、同じIDとnonceを確認 | 新規プロセスのthread/resume、同じIDとnonceを確認 |
-| プロセス終了コード | 通常・再開とも0 | 通常・再開とも0 |
-| 残存プロセス | 観測した子孫に稼働中残存なし | 同左 |
+| Normal task | 6.278 s | 6.741 s |
+| Resume task | 3.853 s | 3.908 s |
+| Output | Matching marker and nonce | Matching marker and nonce |
+| Session identity | `thread.started` | `thread/start` response |
+| Resume | `exec resume`, same ID/nonce | New process `thread/resume`, same ID/nonce |
+| Exit codes | Both 0 | Both 0 |
+| Live owned descendants after cleanup | None observed | None observed |
 
-CLIのセッションは`01a180aa-537f-70c3-97f1-b061ea2ebd46`。
-App Serverのthreadは`01a180aa-7d3f-7351-b450-4fc90ac5997f`。
-これらは今回の専用領域に作成したIDであり、既存ユーザーセッションではない。
-証拠: `.runtime/evidence/comparison.json`、`.runtime/logs/{cli-normal,cli-resume,app-normal,app-resume}.jsonl`。
+The experiment's private runtime retained its newly created session IDs and comparison JSON/JSONL. These were dedicated trial sessions, not existing user conversations. Timings/results alone do not establish wider reliability.
 
-## 制御・エラー・将来拡張の比較
+CLI exposes JSONL thread/turn/item events; callers must combine events, stderr, exit status, and cleanup. App Server adds explicit thread state, correlated RPC/errors, notification buffering, and `turn/interrupt`, at higher bidirectional-protocol complexity. Both can resume saved sessions and both still need a parent deadline. Parallel-load scalability was not verified in this comparison.
 
-| 比較項目 | CLI | App Server |
-| --- | --- | --- |
-| イベント | JSONLのthread.started、turn.started/completed、item.started/completed等を確認 | thread/turn/item、メッセージdelta、tokenUsage、status通知を確認 |
-| 状態監視 | イベントを自分で集計。プロセス存否だけでは成功を判定できない | thread/readでidle/active等を取得でき、ターン状態と分けて監視可能 |
-| 保存セッション再開 | 実測成功。再開にもプロセス起動が必要 | 実測成功。新規接続で同じthreadへturnを追加できる |
-| 中断 | 今回は所有プロセス群の停止。ターン中断のRPCはない | turn/interruptで中断を要求し、interrupted通知を確認できる |
-| タイムアウト | 親側の期限とプロセス解放が必要 | 同じく親側の期限が必要。まず公式interruptを使える |
-| エラー | 異常終了コード・JSONL・stderrを統合する必要 | RPC error、turn failure、ツール失敗を区別できる |
-| 実装複雑度 | 単発処理は小さい。stdin EOF、イベントと終了コードの照合が必要 | 双方向RPC、相関ID、通知保留、未対応要求の拒否が加わる |
-| 複数セッションへの将来性 | 複数プロセスで設計可能だが、状態・制御を外側で補う必要 | thread識別子と明示的状態・中断APIを利用できる。実負荷並列は今回未検証 |
+## Fault and cancellation observations
 
-## タイムアウト・中断・異常終了
+CLI tasks instructed a single `sleep 60`; stopping was checked after command execution began.
 
-CLIでは単一の`sleep 60`を指示し、command_execution開始後の停止を検証した。
-正常完了とは区別し、親が停止した理由と実際の終了コードを記録した。
-
-| CLI実験 | 結果 | 解放込み時間 | 終了コード | 最終残存 |
+| CLI case | Recorded result | Including cleanup | Exit | Final live descendants |
 | --- | --- | --- | --- | --- |
-| 不正sandbox設定 | モデル生成前に起動拒否 | 0.092秒 | 1 | なし |
-| 9秒の実行期限 | TIMED_OUT相当の停止理由 | 10.255秒 | -9 | なし |
-| コマンド開始後の中断 | CANCELLED相当の停止理由 | 11.545秒 | -9 | なし |
+| Invalid sandbox | Rejected before generation | 0.092 s | 1 | None |
+| Nine-second deadline | Timeout-equivalent stop | 10.255 s | -9 | None |
+| Cancel after command start | Cancel-equivalent stop | 11.545 s | -9 | None |
 
-`-9`は所有したnamespace/process群の強制終了であり、タスクの成功を意味しない。
-App Serverについては採用ランナーの実機検証で、timeout=9秒のTIMED_OUT（9.095秒）、コマンド開始後のCANCELLED（10.922秒）を確認した。
-両方ともturn/interruptを送信し、interrupted通知、unsubscribe、プロセス解放、稼働中残存なしを確認した。
-不正RPCの実機検証では、未知のsandbox値にJSON-RPC error `-32600`が返り、モデル生成は始まらなかった。
-証拠: `cli-faults.json`、`live-checks.json`、`final-protocol-check.json`と対応JSONL。
+`-9` means forced owned namespace/process cleanup, not task success. The selected App Server runner observed timeout at 9.095 seconds and cancellation at 10.922 seconds, including `turn/interrupt`, interrupted notification, unsubscribe, cleanup, and no live remnants. An invalid sandbox RPC returned `-32600` before generation. Historical evidence includes `cli-faults.json`, `live-checks.json`, `final-protocol-check.json`, and associated JSONL.
 
-## 採用方式
+## Decision and failed attempts
 
-**専用App Server stdioを採用した。**
-CLIの正常実行・保存・再開は機能したが、今回求める状態取得とターン中断をCLIプロセス制御で補うと、管理ロジックが増える。
-thread/readとturn/interruptを公式に利用でき、将来のセッション管理にも直結することから、ユーザーの優先条件に従ってApp Serverを選んだ。
-比較用CLIコードは`tests/`に限定し、本体に複数backendの抽象化は導入しなかった。
-公式SDKの導入も今回は不要とした。これはローカル最小実装の判断であり、productionサポートを保証するものではない。
+**The runner selected dedicated App Server stdio.** Official thread inspection and turn interruption fit the requested control model without reconstructing them around CLI processes. Comparison CLI code stayed in tests; no multi-backend abstraction or SDK was added. This was a minimal local design choice, not a production-support guarantee.
 
-## 失敗と修正を含む記録
+The record retained failures rather than deleting assertions:
 
-1. 最初のCLIはstdinを閉じておらず、90秒の期限までイベントを取得できなかった。cleanupがstdinを閉じた後の猶予中にturn開始が発生し、92.220秒で停止した。ログ再点検でこの意図しない開始も利用件数へ加えた。現在は実行直後にEOFを送る。
-2. 最初の外側bwrap構成は内側のCodex sandboxのUID namespace生成を妨げ、App Serverのreadタスクが拒否された。会話resumeだけは成功したが、readタスク成功とは記録していない。
-3. 名前空間の前提検証が失敗した後に比較を開始した誤りがあり、当該検証プロセスを停止した。現在は事前確認が失敗した場合、生成へ進まない。
-4. 外側をunshareと専用mount設定へ変更した。SYS_ADMINを削除しつつ必要なUIDマッピングを許可し、nested sandboxの非生成事前検証が通った。
-5. 権限拒否を報告したターンがcompletedになり、初版ランナーがタスク成功と誤分類した。最終結果のoutcome schemaと独立した失敗判定を追加し、再検証でFAILEDを確認した。
-6. CLI強制終了直後の検査では、namespace解放中のプロセスを残存と判定した。後続検査ではすでに終了していたため、上限付きの終了待機を追加し、再検証で残存なしを確認した。
+1. Unclosed CLI stdin prevented expected events until a 90-second deadline. Cleanup closed stdin and unintentionally started a turn during grace; it stopped at 92.220 seconds and counted toward usage. Immediate EOF fixed the path.
+2. An initial outer bwrap setup blocked nested Codex UID-namespace creation. Conversation resume alone succeeded; the read task did not.
+3. Comparison mistakenly started after failed namespace preflight and was stopped. The corrected flow refuses generation after failed preflight.
+4. The historical host implementation changed outer setup to unshare/private mounts and validated a non-generating nested-sandbox probe. This is not permission to repeat nested isolation from a forbidden context today.
+5. A permission-refusal turn reported completed and was initially misclassified. An outcome schema plus independent failure checks produced FAILED on retest.
+6. Immediate post-kill inspection briefly mistook namespace teardown for surviving processes; bounded exit waiting confirmed cleanup.
 
-初回失敗の証拠は `comparison-first-attempt.json`、`live-checks-before-outcome-fix.json`、`cli-faults-before-cleanup-wait.json`、namespaceの各probe記録に残している。
-失敗した検証項目を削除して合格にしていない。モデルの「実行した」という文章だけを実行証拠にしていない。
+First-attempt comparison, pre-outcome-fix, pre-cleanup-wait, and namespace-probe records were preserved. Model narration was never sufficient proof that a command ran.
 
-## 利用枠と未検証範囲
+## Usage and unverified scope
 
-修正確認を含め、ログで確認したturn開始は22件。うち9件は中断・タイムアウトで停止し、初回cleanup中の意図しない開始1件も含む。
-stdio初期化、schema生成、認証状態確認、直接のsandbox拒否検査はモデル生成を使っていない。
-観測できた17件分のtoken使用報告を`usage-observed.json`に記録した。未完了CLIの使用量がなく、CLIとApp Serverで集計の範囲も異なるため、単純合計や料金換算はしていない。
-同じ7日窓の利用率は観測開始時16%、終了時17%。このチャット等の同一アカウント利用を分離できず、差分を本実験だけに帰属できない。
-APIキーの作成・取得・利用は行っていない。
+Logs recorded 22 turn starts, including nine stopped by cancellation/timeout and the unintended cleanup-time start. Initialization, schema generation, authentication-state checks, and direct sandbox-refusal probes did not generate models. Seventeen observed token reports were retained without naïve totals or cost conversion because unfinished CLI usage was missing and aggregation differed. The account's seven-day utilization changed from 16% to 17%, but other same-account activity prevented attribution to this experiment. No API key was created, obtained, or used.
 
-大量出力、ネットワーク断、サービス制限、認証更新・失効、別バージョン、他OS、複数セッションの並行負荷、任意タスクの意味的検証は未実施。
+Large output, network interruption, service limits, authentication refresh/revocation, other versions/OSes, concurrent load, and arbitrary semantic task verification were not tested by Phase 1-A.

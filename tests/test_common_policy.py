@@ -140,8 +140,8 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(text.count(bundle.text), 1)
         self.assertIn('Return verified JSON', text)
         self.assertIn(self.hash, text)
-        self.assertIn('ユーザーの明示的制約が優先', text)
-        self.assertIn('権限や承認を追加しない', text)
+        self.assertIn('explicit constraints take precedence', text)
+        self.assertIn('grants no additional permissions or approval', text)
         with self.assertRaises(PolicyError): developer_instructions(bundle, bundle.text)
 
     def test_messages_and_handoffs_have_body_without_network(self):

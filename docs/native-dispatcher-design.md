@@ -1,73 +1,69 @@
-# Native親アクションdispatcher：実装準備
+# Native Parent-Action Dispatcher
 
-検証範囲：純粋ロジックとオフラインfixture。MCP追加・nativeモデル呼出しは行っていない。先行する8ファイルとは別差分で、コード配置と実ツールでの動作検証は区別する。
+`NativeDispatcher` performs one bounded scheduling step and journals the parent actions needed to continue. It does not launch a model or service, add a socket/database/provider, call native tools, or connect native tasks to the FIFO daemon. Its code and offline fixtures are distinct from live execution evidence. The [pre-v4 Japanese record](native-dispatcher-design_jp.md) preserves the initial rollout and historical counts.
 
-## 既存実装との分担
+## Responsibilities
 
-| 経路 | 実装と責任 | 今回の扱い |
-|---|---|---|
-| daemon/scheduler/runner | SQLite予約、tokenと親子PIDの照合、worker起動、cgroup解放照合、app-server実行と回収 | 変更・接続しない。別の実行経路を再実装しない |
-| NativeTeam / CLI | DAG ready、admit、worktree/role/policy検査、予算・lease、bind、receipt、artifact hash | そのまま再利用。CLIは親の標準spawnを呼ばない |
-| NativeDispatcher | 受領の冪等性、実行待ち操作の永続化、親からの観測照合、依存解放までの1ステップ進行 | 今回の新規ロジック |
-| 親の標準ツール接続 | spawn、状態取得、interrupt、独立検証、統合 | fixture代替のみ。実ツールへの接続と継続呼出し担当は残件 |
-
-新しいlauncher、OS隔離、socket、DB、認証、providerは追加しない。Gitの固定メタデータ検査とartifact処理は既存NativeTeamへ委譲する。taskのinstruction、検証commandは記録であり、このdispatcherは実行しない。
-
-## 呼出し契約
+| Component | Responsibility |
+| --- | --- |
+| Existing daemon/scheduler/runner | SQLite reservations, process identity, worker/app-server execution, and cgroup release. This path is not replaced. |
+| NativeTeam | DAG admission, worktree/policy/revision validation, budgets, leases, native binding, completion receipts, and artifact hashes. |
+| NativeDispatcher | Idempotent receipt of work, durable parent actions, observation reconciliation, and one-step dependency progress. |
+| Parent | Standard spawn/poll/interrupt calls, integration, independent checks, and explicit recording of actual results. |
 
 ```python
 from native_dispatcher import NativeDispatcher
 
-# spec/rootは、既存NativeTeamと同じ検証済みの作業定義・専用run領域。
+# Use a verified specification and a new dedicated private run directory.
 dispatcher = NativeDispatcher.receive(root, spec, submission_key="request-v1")
 progress = dispatcher.advance()
-actions = dispatcher.take()  # 戻す前にISSUEDをatomic保存
-# 親が各actionを適切な標準ツール・検証手順へ対応させる。
+actions = dispatcher.take()  # Atomically persists ISSUED before returning.
+# The parent handles each action with actual tools/checks, then records it:
 # dispatcher.observe(action["action_id"], observation)
 ```
 
-`advance()`は常駐loopではない。親が期限付きで繰返し呼ぶ必要がある。戻り状態は`COMPLETE / READY / AWAITING_OBSERVATION / BLOCKED`。常に`parent_executor_required=true`を返す。親が停止している間の強制timeoutや確実なinterruptを保証しない。
+`advance()` is not a resident loop. The parent must continue it within the frozen limits. It returns `COMPLETE`, `READY`, `AWAITING_OBSERVATION`, or `BLOCKED`, with `parent_executor_required=true`. It cannot enforce timeout or reliable interruption while the parent is stopped. Instruction and command strings are records, not executed input.
 
-| action | 親側で必要な処理 | observationの必須フィールド |
-|---|---|---|
-| SPAWN | 指定role・専用worktreeで標準spawn | agent_id |
-| COORDINATE | 親自身が既存artifact統合を実行し検証 | agent_id, accepted, reason, verification |
-| POLL | bindingと一致するnative IDの終了状態を取得 | agent_id, state |
-| INTERRUPT | 同じnative IDへ中断要求 | agent_id, accepted |
-| VERIFY | 親が要求・成果を検査しreceiptを確定 | agent_id, accepted, reason, verification |
+## Action contract
 
-stateは`RUNNING/SUCCEEDED/FAILED/CANCELLED/UNKNOWN`。verificationは`commands`と`exit_codes`の同じ長さの配列。成功採用にはexit 0が必要。想定外のフィールドとnative ID不一致は記録前に拒否する。IDはローカル対応づけであり、呼出し元identityやproviderの冪等性を証明しない。秘匿情報をinstruction、reason、commandsへ含めない。
+| Action | Required parent work | Exact observation fields |
+| --- | --- | --- |
+| `SPAWN` | Launch the assigned role in its dedicated worktree once. | `agent_id` |
+| `COORDINATE` | Integrate and verify as the parent. | `agent_id`, `accepted`, `reason`, `verification` |
+| `POLL` | Observe the bound native ID's actual status. | `agent_id`, `state` |
+| `INTERRUPT` | Request interruption of that same bound ID. | `agent_id`, `accepted` |
+| `VERIFY` | Check original requirements and artifacts before acceptance. | `agent_id`, `accepted`, `reason`, `verification` |
 
-native終了だけで依存を解放しない。VERIFYを経て既存NativeTeamが許可範囲・revision・artifact hashを確認し、成功receiptを保存してから次をadmitする。Verifier roleの独立性・検証内容の妥当性は親の割当てと検証手順に依存する。任意の`accepted=true`が独立検証の証明になるわけではない。
+States are `RUNNING`, `SUCCEEDED`, `FAILED`, `CANCELLED`, and `UNKNOWN`. Verification has equal-length nonempty `commands`/`exit_codes` lists, with zero exits for acceptance. Extra fields and mismatched native IDs are rejected before recording. IDs are local correlation, not caller authentication or proof of provider idempotency. Keep secrets out of instructions, reasons, and command records.
 
-## 再開・不確定結果
+Native terminal state alone does not release dependent work. The parent handles `VERIFY`; NativeTeam checks scope, revision, and hashes and persists a success receipt before dependencies become eligible. `accepted=true` is not itself evidence of review independence or correct verification content.
 
-- 同じrun/key/specの受領は冪等。異なるkey/specは競合。plain NativeTeamのrunを黙って引き継がない。
-- admit後かつaction保存前に停止した場合はUNKNOWNにしてleaseを保持し、再spawnしない。NativeTeam作成とjournal初期化の間の停止も照合待ちにする。
-- `take()`後、親のspawn実行前後で停止するとISSUEDが残る。標準spawnのexactly-onceは保証できない。snapshot内のactionを親が照合し、既知の実IDをobserveする。単純な再take・再起動では再spawnしない。
-- 観測はOBSERVEDとして先に保存する。bind/complete直後のACK喪失は、保存済みbinding/receiptを照合しローカル処理だけ再開する。異なる観測への差替えは拒否する。
-- POLL/INTERRUPTのACKが不明な場合も自動再発行しない。親による照合が必要。通常のPOLL間隔は1秒以上。
-- UNKNOWNでは再spawn・即時中断をしない。既存期限到達時のみ中断を要求する。TIMED_OUT/UNKNOWNは終了観測後も品質成功へ変更しない。
-- 中断受付は終了証拠ではない。終端状態のPOLL確認までleaseを保持する。実ID不明時は中断対象を推測しない。
-- admitからtakeの間に期限が来たSPAWN/COORDINATEはBLOCKEDとし、返却しない。既存leaseを解放済みとは推測せず、照合対象として残す。
-- 同一actionの同一観測を保持期間内なら重複ACKとして受け入れる。retired actionと軽量eventは各直近32件。古い/打切りactionへの遅延ACKは保守的に拒否し、再実行しない。これは完全な長期監査基盤ではない。
-- 自動retryは追加しない。既存NativeTeamのretry/escalation上限と人の照合手順を使う。今後retry接続を行うなら、旧lease解放と新dispatch IDの対応を追加検証する。
+## Resume without replay
 
-## 永続化と制限
+- Receiving the same run/key/spec is idempotent; a changed key/spec conflicts. Plain NativeTeam runs are not silently adopted.
+- A stop between admission and action journaling leaves uncertain work held, not respawned. A stop between NativeTeam creation and dispatcher initialization likewise requires reconciliation.
+- `take()` persists `ISSUED` before handoff. A stop before or after external spawn cannot establish exactly-once execution. The parent must correlate the stored action with actual history; another `take()` or reload does not resend it.
+- Observations are saved as `OBSERVED` first. Lost acknowledgments after bind/complete are reconciled against existing bindings/receipts, resuming local registration only. Different replacement observations are rejected.
+- Unknown POLL/INTERRUPT outcomes are not automatically reissued. Ordinary polls are spaced by at least one second.
+- `UNKNOWN` neither relaunches nor immediately interrupts work. The existing deadline can require interruption. Timeout/unknown results never become quality success after late terminal observation.
+- An accepted interrupt is not a terminal receipt. Keep the lease until an actual terminal poll; never guess an interrupt target when the native ID is unknown.
+- A deadline reached between admission and `take()` blocks stale `SPAWN`/`COORDINATE` handoffs without pretending their leases were released.
+- Identical observations can be acknowledged again within retained history. The most recent 32 retired actions and 32 lightweight events are retained. Late acknowledgment of older/truncated history is conservatively rejected, never replayed.
+- No automatic retry is added. Use existing bounded retry/escalation only after actual prior release and a known failure.
 
-NativeTeamのprivate `_change()`を利用し、同じatomic snapshotの`dispatcher`名前空間（schema 1）へ記録する。別stateファイルへ真実を分散しない。専用0700ディレクトリの既存runtime lockで親アクション操作を直列化する。NativeTeam本体のlockとは分離する。
+## Persistence and limits
 
-先行8ファイルを変えず準備するためのprivate API依存である。サービスへ組み込む前に明示的な拡張API・schema互換性・保存上限の契約を決める必要がある。既存snapshotの1MiB上限を継承し、超過時はエラーで止める。大きな出力本文は保存せず既存artifactを使う。
+The journal uses NativeTeam's private `_change()` transaction and the same atomic snapshot under `dispatcher` schema 1. Dedicated 0700 control directories and runtime locks serialize parent-action changes separately from the NativeTeam lock. State inherits the 1 MiB limit; oversize writes fail. Keep large outputs in artifact files, not snapshot bodies.
 
-このモジュール自体は標準ツールを呼ばず、daemon/MCPへも接続しない。追加native E2Eは未実施。コードを配置しても、fixture成功を全工程の無人化完成とは扱わない。
+This is an explicit private-API dependency, not a stable deployment extension contract. Before service integration, review extension/schema compatibility and storage bounds. The [parent adapter](native-parent-adapter.md) adds tool descriptors and observation registration; it does not turn fixtures into unattended execution or automatic wake.
 
-## 検証
+## Offline verification
 
 ```bash
-python3 -B -m unittest discover -s tests -p test_native_dispatcher.py -v
-python3 -B -m unittest discover -s tests -p test_native_team.py -v
+PYTHONPATH=tests python3 -B -m unittest \
+  test_native_team test_native_dispatcher test_native_parent_adapter \
+  test_native_handoff test_native_agent_profiles -v
+node --test tests/native_thread_capture.cjs
 ```
 
-追加17件と既存19件を別集計する。fixtureの4-node DAGは独立実装a/b、親の統合、Verifierの順に進み、偽のspawnは計3回。実際のモデル呼出し・GPU・service・network・namespace操作は0回。このfixtureの時間や重なりは、既存の実Agent並列PoCの測定値ではない。
-
-親用のdescriptor・観測登録CLIの準備は[標準ツールadapter](native-parent-adapter.md)を参照。Pythonから実ツールを直接実行する機能や常駐wakeは追加していない。
+Fixtures cover independent worktrees, parent integration, verifier ordering, held leases, acknowledgment loss, model/role pins, and bounded fan-out. They do not call live models, GPU providers, deployment services, or namespace launchers. Fixture timing is not live-agent latency evidence.

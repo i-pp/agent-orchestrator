@@ -1,106 +1,71 @@
-# Workspace隔離設計 — Phase 2-C
+# Workspace Isolation
 
-## 対象と信頼境界
+This reference describes Phase 2-C with its D1 resource extension. It is not permission to run isolation from an already isolated Codex environment; see the [pre-launch guard](nested-isolation-guard.md). The [Japanese historical source](workspace-isolation_jp.md) is unchanged.
 
-新しいisolatedモードは、同じruntimeのCodexタスクが相互のworkspace・状態・ログを参照／変更できない構成とする。
-ローカルoperator、ランナーのソース・許可コマンド、Codexバイナリ、OS/kernelは信頼する。
-同じホストUIDを自由に操作できる悪意あるoperator、kernel脆弱性、CPU／メモリ枯渇を防ぐVM相当の境界ではない。
-旧モードは共有workspaceと既存read-only動作を保持し、同時実行しない。強い分離には`--isolated`を使う。
+## Scope and trust boundary
 
-## 所有と配置
+Isolated mode prevents Codex tasks in the same runtime from reading or changing one another's workspace, state, and logs. The local operator, runner source, allowed verification programs, installed Codex binary, OS, and kernel are trusted. This is not a VM boundary against a malicious operator controlling the same host UID, kernel vulnerabilities, or resource exhaustion. Legacy shared-workspace mode remains serial/read-only; use `--isolated` for the stronger workspace boundary.
+
+## Ownership and layout
 
 ```text
 <runtime>/
-  tasks.sqlite                 # coordinatorのみが操作
-  runner.lock / leases/        # 実行権限のlease
-  fixtures/<name>/             # operatorが用意する専用入力
+  tasks.sqlite                 # coordinator-owned database
+  runner.lock / leases/        # execution leases
+  fixtures/<name>/             # dedicated operator-provided input
   workspaces/<workspace_id>/
-    workspace/                 # タスクの成果物・検証対象
-    codex-home/                # そのworkspaceだけのCodex状態
-    tmp/jail/                  # 空mountpoint。jail本体はnamespace内tmpfs
-  snapshots/<snapshot_id>/     # 終了後の独立コピー
+    workspace/                 # task artifacts and verification targets
+    codex-home/                # Codex state for this workspace only
+    tmp/jail/                  # empty mountpoints; actual jail is namespace tmpfs
+  snapshots/<snapshot_id>/     # independent copy after termination
   logs/ / db-backups/
 ```
 
-workspaces表はID・作成owner task・access・状態・元snapshot・初期fingerprint・作成／解放時刻を保存する。
-tasksとexecutionsにもworkspace_id・role・access・snapshot_idを記録する。
-新規タスクは新規workspace、明示resumeだけは元のworkspaceを継承する。ownerからのresume祖先と権限の一致を検証する。
-同じworkspaceの同時利用はleaseで拒否する。
+The workspace table records ID, initial owner task, access, state, source snapshot, initial fingerprint, and creation/release time. Tasks and executions also record workspace/role/access/snapshot. New tasks receive new workspaces; only explicit resume inherits the source workspace after checking owner ancestry and access. A lease rejects simultaneous use.
 
-入力はruntime/fixtures内の単一名のみ。製品checkoutや任意の絶対パスを入力にする機能はない。
-祖先symlink、内部symlink、hardlink、非通常ファイル、path traversal、`/proc/self/mountinfo`上の内部mountを拒否する。
-プロジェクト側の`.codex`設定も拒否し、固定した起動方針への上書きを許可しない。
-通常ファイル1,000件・各16 MiB・合計約64 MiB・directory 1,000件の上限を適用する。
-コピーは新規ファイルへ行い、hardlinkで共有しない。空directoryと所有者の実行bitを保持する。
-copy前後とコピー先の通常ファイルmanifestを照合する。
+Fixture inputs are single names under `runtime/fixtures`, not arbitrary absolute paths or product checkouts. Reject ancestor/internal symlinks, hardlinks, non-regular files, traversal, nested mounts detected through `/proc/self/mountinfo`, and project `.codex` overrides. Limits are 1,000 regular files, 16 MiB per file, about 64 MiB total, and 1,000 directories. Copy into new files, never shared hardlinks; preserve empty directories and owner execute bits. Compare regular-file manifests before/after the source copy and at the destination.
 
-## 実際のLinux境界
+## Linux boundary
 
-1. 専用子プロセスにuser/mount/PID/IPC namespaceを作る。親死亡guard、kill-child、専用procを使う。
-2. mount伝播をprivateにし、tmpfsの新しいrootを構成する。
-3. `/usr`・`/etc`・標準library、必要なCodex実行ディレクトリをread-onlyでbindする。
-4. 自分のsession rootだけをbindする。rootはread-only、専用CODEX_HOMEはCodex用に書込み可、workspaceはタスクのaccessに従う。
-5. 認証は既存auth.jsonをread-only bindする。Pythonで内容を開く・複製する処理はない。元HOMEはmountしない。
-6. 最小dev、専用proc/tmp/var-tmp、必要なDNS resolverファイルのみを作る。
-7. `pivot_root`し、旧rootをdetachする。host cwd／source FDを残さない。
-8. CAP_SYS_ADMIN/SYS_CHROOT等を落とす。入れ子のuser namespaceに必要なSETUID/SETGID/SETFCAPだけをbounding setへ残す。
-9. この外側境界の中でCodex自身のread-only／workspace-write sandboxも使う。
+1. Create a dedicated child's user/mount/PID/IPC namespaces, parent-death guard, kill-child behavior, and private proc.
+2. Make mount propagation private and construct a new tmpfs root.
+3. Bind `/usr`, `/etc`, standard libraries, and required Codex installation directories read-only.
+4. Bind only the owned session root. Keep its root read-only, its Codex home writable to Codex, and its workspace mounted according to task access.
+5. Bind existing `auth.json` read-only without opening/copying its contents in Python. Do not mount the original HOME.
+6. Create minimal devices, private proc/tmp/var-tmp, and required resolver files.
+7. `pivot_root`, detach the old root, and leave no host cwd/source FD behind.
+8. Drop capabilities including SYS_ADMIN/SYS_CHROOT, retaining only SETUID/SETGID/SETFCAP in the bounding set for required nested-user-namespace behavior.
+9. Run Codex's own read-only/workspace-write sandbox inside that outer boundary.
 
-他workspace・coordinator DB・既存HOME・既存daemon socketは新しいrootに存在しない。
-`..`、絶対path、symlink先、`/proc/1/root`でも旧rootへ戻れないことを実OSテストで確認する。
-別のmount namespaceで作るため、元ホストのmount構成は変更しない。
+Other workspaces, coordinator DB, original HOME, and daemon sockets are absent from the new root. Historical OS tests checked that `..`, absolute paths, symlinks, and `/proc/1/root` could not recover the old root. Separate mount namespaces leave the original host mount tree unchanged.
 
-`pivot_root`によるroot変更と旧rootの取り外しは[Linux man-pages](https://man7.org/linux/man-pages/man2/pivot_root.2.html)を参照。
-chroot内からのuser namespace作成制約は[unshare(2)](https://man7.org/linux/man-pages/man2/unshare.2.html)に記載される。
-初期案のchrootはこの制約で失敗した。権限を緩める代替は使わず、pivot_rootと入れ子sandboxの実測で確認した。
+See [pivot_root(2)](https://man7.org/linux/man-pages/man2/pivot_root.2.html) and [unshare(2)](https://man7.org/linux/man-pages/man2/unshare.2.html). The initial chroot approach failed because of nested-user-namespace restrictions; the phase used pivot_root with measured nested-sandbox behavior, not weaker permissions as a fallback.
 
-## read-onlyとworkspace-write
+## Read-only and workspace-write
 
-既定はread-only。workspace自体をread-only mountし、モデルの指示に依存しない。
-workspace-writeは明示タスク＋専用fixtureだけ。成果物SHA-256と許可済みテストを必須にする。
-threadの実効sandbox／approvalを確認し、turn/startにも次を明示する。
+Default access is read-only, enforced by mounts rather than model instructions. Workspace-write requires an explicit task, dedicated fixture, artifact content SHA-256, and allowed tests. Check effective thread sandbox/approval, and explicitly send:
 
 ```json
 {"type":"workspaceWrite","writableRoots":["<own-session>/workspace"],
  "networkAccess":false,"excludeSlashTmp":true,"excludeTmpdirEnvVar":true}
 ```
 
-外側のprivate tmpfsは実行基盤用。モデルの書込み許可は自身のworkspaceだけ。
-既存authのmountはread-onlyで、認証更新が書込みを必要とすれば失敗する。
-隔離コマンドの実行ファイルは/usr配下のsystem programまたは現在インストール済みのCodexだけを許可する。別workspaceを実行資源としてmountする経路を拒否する。
-trusted App Serverは認証を使用するが、独立検証コマンドのrootではCODEX_HOME全体を空mountで隠し、network namespaceも分離する。
-namespace／nested sandboxのpreflightに失敗した場合はdispatchしない。danger-full-accessや通常起動へのfallbackはない。
+The outer private tmpfs serves infrastructure, not an additional model-writable area. Authentication mounts remain read-only; refresh requiring writes fails. Isolated executables must be system programs under `/usr` or the installed Codex binary. Do not mount another workspace as an execution resource.
 
-[公式App Server資料](https://learn.chatgpt.com/docs/app-server)とCLI生成schemaを照合した。
-現バイナリは上記の5項目を持つが、最新資料のreadOnlyAccess制限は生成schemaに存在しない。
-未実在の項目は送らず、外側mountで読取りを制御する。experimentalApi=falseのままとする。
+The trusted App Server uses authentication; independent verifiers instead hide all of `CODEX_HOME` with an empty mount and use a separate network namespace. Failed namespace/nested-sandbox preflight blocks dispatch. There is no ordinary-launch or danger-full-access fallback.
 
-## 独立レビューと解放
+The phase compared [App Server documentation](https://learn.chatgpt.com/docs/app-server) with the installed binary's generated schema. That binary supported the five fields above but lacked newer `readOnlyAccess` restrictions. Unsupported fields were not sent; outer mounts enforced reads. `experimentalApi=false` remained in use. Recheck schema for another binary.
 
-Implementerの既知の終了状態・資源解放・workspace leaseを確認してsnapshotを作る。
-snapshotはsource task/execution/workspace IDとfingerprintを持ち、ファイルをread-onlyにする。
-Reviewerにはsnapshotから別workspaceへのコピーを渡す。元の実装途中workspaceはmountしない。
-role=reviewerはread-only＋snapshot必須で、fixture入力・書込み権限を拒否する。
-内容の改変は投入時／起動時に検出し、拒否する。
+## Review, snapshots, and release
 
-Reviewerは独立したthread／turn／executionと受入検証・result・ログを持つ。
-元のImplementerの状態や人間承認は変更しない。指摘の判断・根拠はReviewerの記録から追跡する。
-roleはタスクの属性であり、特定モデル／人格への固定ではない。
+Create a snapshot only after a known terminal implementer state, confirmed cleanup, and acquisition of the workspace lease. Record source task/execution/workspace and fingerprint; make snapshot files read-only. A reviewer gets an independent workspace copy, never the source's in-progress mount. `role=reviewer` requires a snapshot and read-only access, rejects fixture/write inputs, and checks tampering at submission/start.
 
-実行中のleaseとmountは終了・中断・親死亡で解放する。`release`は終了済みworkspaceをRELEASEDへ移し、再利用を拒否する。
-QUEUED/RUNNING/VERIFYING/UNKNOWNが同じworkspaceに残る場合は拒否する。成果物・会話・ログは削除しない。
-作成途中でDB commitに至らなかった未参照directoryも自動削除・実行せず、人間の調査対象として保持する。
+The reviewer has independent thread/turn/execution, acceptance, result, and logs. It does not approve or alter the implementer's state. A role is task metadata, not a fixed model/personality.
 
-## 限界と将来の選択肢
+Execution leases and mounts release on termination, cancellation, or parent death. `release` marks a terminated workspace `RELEASED` and rejects reuse; it refuses while associated `QUEUED`/`RUNNING`/`VERIFYING`/`UNKNOWN` tasks remain. Artifacts, conversations, and logs are not deleted. Unreferenced directories left before DB commit are preserved for investigation, not automatically executed or removed.
 
-今回のfixtureは小規模な通常ファイルが対象。Git metadata、特殊ファイル、ACL/xattrの再現は対象外。
-fingerprintは通常ファイル名・サイズ・内容hashで、実行bit・空directory・一時的な副作用の証明ではない。
-空directoryと実行bitはコピーするが、これらも受入条件に必要なら別途テストへ含める。
-同一UIDのoperatorによる同時改変を攻撃者モデルに含めない。
-大規模／敵対的入力、cgroupによる資源上限、OS再起動、他kernel・他OSは未検証。
-将来のGit worktreeは「専用checkoutを作る入力方式」の候補であり、今回の境界やleaseの代用にはしない。今回は実装しない。
+## Limits and later resource work
 
-## Phase 2-D1の資源境界
+Fixtures cover small regular files, not reproduction of Git metadata, special files, ACLs, or xattrs. Fingerprints include regular-file names, sizes, and hashes, not execute bits, empty directories, or transient effects. Those copied properties need explicit tests when part of acceptance. Concurrent malicious same-UID modification is outside this threat model.
 
-namespaceの外側に専用cgroup scopeを加え、CPU／memory／TIDを制限する。namespaceのmount・capability制限は緩和しない。
-詳細とディスク総量保証の限界は[資源制限](resource-limits.md)を参照。
+Large/adversarial inputs, other kernels/OSes, and OS restart were not verified by C. Git worktrees were only a future input-method candidate, not a replacement for mounts or leases. D1 added private outer cgroup scopes without weakening namespace/capability restrictions; see [resource limits](resource-limits.md), including the lack of a hard total-disk quota.

@@ -29,9 +29,11 @@ class ParentAdapterTests(unittest.TestCase):
         self.addCleanup(self.f.doCleanups)
         roles = self.f.project / '.codex/agents'
         roles.mkdir(parents=True)
-        for role in ['implementer', 'verifier', 'researcher']:
+        from native_agent_profiles import ROLES
+        for role in [v[0] for k, v in ROLES.items() if k != 'Coordinator']:
             (roles / (role + '.toml')).write_text(
                 'name = "' + role + '"\ndescription = "fixture role"\n'
+                'model = "gpt-6.1-sol"\nmodel_reasoning_effort = "max"\n'
                 'developer_instructions = "Do only the assigned role. Never spawn children."\n')
         self.bundle = SimpleNamespace(**fixtures.POLICY, text='verified fixture common policy')
         policy = patch('native_parent_adapter.load_project_policy', return_value=self.bundle)
@@ -79,7 +81,8 @@ class ParentAdapterTests(unittest.TestCase):
             self.assertIn('Never spawn children', message)
             self.assertIn(self.spec['requirements'][0], message)
             self.assertIn('input_revision', message)
-            self.assertNotIn('model', call['arguments'])
+            self.assertEqual(call['arguments']['model'], 'gpt-6.1-sol')
+            self.assertEqual(call['arguments']['reasoning_effort'], 'max')
             self.assertEqual(call['not_after'], self.f.clock[0] + 300)
             self.assertEqual(self.state()['dispatcher']['actions'][call['action_ids'][0]]['status'], 'ISSUED')
 
@@ -135,7 +138,7 @@ class ParentAdapterTests(unittest.TestCase):
 
     def test_unsupported_role_model_setting_is_not_ignored(self):
         role = self.f.project / '.codex/agents/implementer.toml'
-        role.write_text(role.read_text() + 'model = "fixture-unspecified-model"\n')
+        role.write_text(role.read_text().replace('gpt-6.1-sol', 'fixture-unspecified-model'))
         before = self.state()
         with self.assertRaisesRegex(AdapterError, 'UNSUPPORTED_ROLE_SETTINGS'):
             self.adapter.step()

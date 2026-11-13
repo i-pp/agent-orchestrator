@@ -16,6 +16,7 @@ sys.path.insert(0, str(PROJECT / 'src'))
 from codex_app_protocol import ProtocolUnknown
 from codex_host import CLEANUP, pipeline_held
 from codex_pipeline import Pipeline
+from test_codex_app_protocol import MODEL
 
 
 THREAD = '10000000-0000-4000-8000-000000000091'
@@ -50,6 +51,9 @@ class PipelineFoundationIsolatedTests(unittest.TestCase):
                 'native_context_state': 'READY'}
             state['tasks'][TASK] = {
                 'id': TASK, 'thread_id': THREAD, 'model': 'offline-model',
+                **Pipeline._selection('offline-model', None, {'default_reasoning_effort':'medium',
+                    'supported_reasoning_efforts':['medium', 'high']}),
+                'reasoning_effort_evidence': {'turn_transport':'not_sent'},
                 'prompt': 'private synthetic prompt', 'prompt_sha256': 'f' * 64,
                 'state': 'QUEUED', 'remote_turn': None, 'deadline': None, 'answer': None,
                 'answer_truncated': False, 'stop_sent': False, 'queue_seq': 0,
@@ -123,7 +127,7 @@ class UnknownDispatchSyntheticClient:
         if method == 'account/read':
             return {'account': {'type': 'chatgpt'}}
         if method == 'model/list':
-            return {'data': [{'model': 'offline-model', 'hidden': False}], 'nextCursor': None}
+            return {'data': [MODEL], 'nextCursor': None}
         if method == 'turn/start':
             raise ProtocolUnknown('synthetic lost acknowledgement')
         raise AssertionError('unexpected synthetic app-server call: ' + method)

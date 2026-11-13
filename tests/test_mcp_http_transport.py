@@ -132,7 +132,7 @@ class MCPHTTPTransportTests(unittest.TestCase):
         self.assertEqual(json.loads(body)['error']['code'], -32020)
 
     def test_mcp_2_decodes_base64_encoded_non_ascii_name_before_comparing(self):
-        name = 'レビュー 世界'
+        name = '\u30ec\u30d3\u30e5\u30fc \u4e16\u754c'
         encoded = '=?base64?' + base64.b64encode(name.encode('utf-8')).decode('ascii') + '?='
         request = self._modern('prompts/get', {'name': name})
         status, _, body = self._call(request, protocol=REQUEST_PROTOCOL,
@@ -188,7 +188,7 @@ class MCPHTTPTransportTests(unittest.TestCase):
 
 
     def test_event_name_header_decodes_base64_non_ascii_event_names(self):
-        name = '記事.更新'
+        name = '\u8a18\u4e8b.\u66f4\u65b0'
         encoded = '=?base64?' + base64.b64encode(name.encode()).decode() + '?='
         for method in ('events/subscribe', 'events/unsubscribe'):
             with self.subTest(method=method):

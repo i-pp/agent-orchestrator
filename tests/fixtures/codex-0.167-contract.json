@@ -218,5 +218,35 @@
       ]
     }
   },
-  "validated_examples": 17
+  "validated_examples": 17,
+  "reasoning_contract": {
+    "effort_type": "string",
+    "effort_min_length": 1,
+    "effort_enum": null,
+    "option_required": [
+      "description",
+      "reasoningEffort"
+    ],
+    "thread_config_key": "model_reasoning_effort",
+    "thread_echo_optional": true,
+    "thread_echo_nullable": true,
+    "turn_has_effort_receipt": false,
+    "schemas": {
+      "v2/ModelListResponse.json": {
+        "sha256": "2fb387a2ed258fc74258828ea342d68f89ce4e8e22cd0329ca59d2b423f9108b"
+      },
+      "v2/ConfigReadResponse.json": {
+        "sha256": "69a32e3d84e16045802dff8abf01770d759ebc758965c3258a30ea4a93159fce"
+      },
+      "v2/ThreadStartResponse.json": {
+        "sha256": "dfacf835b6b46a9f087b3e89a81f44f1ed0620518a7a957a3d06681bd86b6944"
+      },
+      "v2/ThreadResumeResponse.json": {
+        "sha256": "f450bafe946842b04e49db3e661738b52d8a64f32089fe4fe9ae9c5eab5b8498"
+      },
+      "v2/TurnStartResponse.json": {
+        "sha256": "b75b88c2f507685b948d06166b5436678fd320c9878883d97f5a17f620a25116"
+      }
+    }
+  }
 }

@@ -1,6 +1,6 @@
 # Phase Reports
 
-These reports preserve the evidence, limitations, and historical results for each development phase. Read the report for a feature before treating it as currently verified.
+These original Japanese reports preserve the evidence, limitations, and historical results for each development phase. Their bytes are retained as historical evidence rather than rewritten as current product documentation. English explanations are linked from the [README](../README.md). A report records what was observed in its stated environment and date, not what is currently verified in every deployment.
 
 - [Phase 1 report](phase1-report.md)
 - [Phase 2-A/B report](phase2-ab-report.md)

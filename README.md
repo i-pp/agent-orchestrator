@@ -10,18 +10,23 @@ Agent Orchestrator helps operators distinguish running a Codex task from verifyi
 
 There is no Python package installer; the Python code uses the standard library. The documented environment requires Linux, Python 3.14, an existing Codex CLI and file-auth setup, `unshare`, `mount`, `setpriv`, `bwrap`, and cgroup v2 through a delegated systemd user manager. The reported verification host is Ubuntu 26.04.1 with Python 3.14.4 and `codex-cli 0.164.0-alpha.11.1`. Other operating systems, CLI versions, and keyring authentication are unverified. See the [systemd deployment gate](docs/systemd-deployment.md) and [PoC service setup](docs/poc-services.md).
 
-Before `run`, configure the operator-managed common-policy checkout. `config/upstream-policy.json` pins commit `aeef6db1cc9680833277f76962044da0dae501b9`; the default checkout path is `../ai-orchestration` relative to the repository root. Verify the selected checkout and pin with `python3 -B scripts/policy_context.py --format inspect`. See [common-policy setup](docs/common-policy.md) for path overrides and integrity requirements.
+Before `run`, configure the operator-managed common-policy checkout. The [policy manifest](config/upstream-policy.json) records the adopted commit and document hashes; the default checkout path is `../ai-orchestration` relative to the repository root. Verify the selected checkout and pin with `python3 -B scripts/policy_context.py --format inspect`. See [common-policy setup](docs/common-policy.md) for path overrides and integrity requirements.
 
 ## Usage
 
 ```bash
 python3 -B src/runner.py --help
-python3 -m unittest discover -s tests -v
+PYTHONPATH=tests python3 -B -m unittest test_common_policy test_upstream_policy test_native_agent_profiles -v
 ```
 
-The [runner how-to](docs/how-to/run-task.md) demonstrates a read-only flow: check a fresh runtime, create a fixture, queue a task, then inspect its state. Review-time help commands and `policy_context inspect` passed against hash-verified GitHub API-materialized working trees at the reviewed PR code head and pinned policy commit; subsequent commits changed documentation only. Fixture creation, queue-only `submit`, and `show` passed against a source snapshot whose runtime blobs match the current PR head. `check` at the reviewed code head returned `BLOCKED` in this Codex sandbox (`executed=false`), and live `run` was not attempted. The [testing guide](docs/testing.md#review-time-validation) records provenance and limits; follow-up issue [#2](https://github.com/i-pp/agent-orchestrator/issues/2) tracks canonical-origin verification and live execution.
+The [runner how-to](docs/how-to/run-task.md) demonstrates a read-only flow: check a fresh runtime, create a fixture, queue a task, then inspect its state. The [testing guide](docs/testing.md) separates earlier runner-documentation evidence from the current focused offline suites. Historical host suites may exercise systemd, installed Tunnel binaries, or namespace tools; do not run whole-suite discovery blindly in an already isolated environment. Live `run` is a separate, explicitly selected operation, not a consequence of a unit-test pass.
 
 ## Advanced Usage
+
+- [Branch reconciliation and recovery references](docs/branch-reconciliation.md)
+- [English documentation and preserved historical sources](docs/language-and-history.md)
+- [Provider-discovered Codex model and reasoning-effort selection](docs/codex-model-selection.md): bounded read-only catalogue pages, operator-allowed choices, and immutable per-task settings. This opt-in pipeline is separate from native role aliases.
+- [Native parallel agent team](docs/native-agent-team.md): explicit per-role model settings, three implementation levels, focused independent reviews, and optional advisory orchestration. Use the non-executing planner before constructing a bounded run.
 
 - [Architecture and task lifecycle](docs/architecture.md)
 - [Workspace isolation](docs/workspace-isolation.md) · [Concurrency](docs/concurrency-design.md) · [Recovery](docs/recovery-design.md)
@@ -31,7 +36,7 @@ The [runner how-to](docs/how-to/run-task.md) demonstrates a read-only flow: chec
 
 ## Documentation
 
-See [verification design](docs/verification-design.md), [Git tracking](docs/git-tracking.md), [testing](docs/testing.md), and the [phase report index](docs/phase-reports.md). Shared orchestration policies are maintained in [`i-pp/ai-orchestration`](https://github.com/i-pp/ai-orchestration). The [Japanese README](README_jp.md) is the translation of this canonical English page.
+See [verification design](docs/verification-design.md), [Git tracking](docs/git-tracking.md), [testing](docs/testing.md), and the [phase report index](docs/phase-reports.md). Shared orchestration policies are maintained in [`i-pp/ai-orchestration`](https://github.com/i-pp/ai-orchestration). The [historical Japanese README](README_jp.md) preserves earlier context, not a second current runtime procedure.
 
 ## Optional MCP Events integration
 

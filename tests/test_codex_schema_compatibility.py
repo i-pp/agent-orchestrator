@@ -38,6 +38,18 @@ class Codex0167ContractTests(unittest.TestCase):
         self.assertEqual(set(resolved['required']), {'requestId', 'threadId'})
         self.assertEqual(resolved['validated_id_types'], ['integer', 'string'])
 
+    def test_reasoning_contract_is_advertised_strings_not_native_role_enum(self):
+        value = CONTRACT['reasoning_contract']
+        self.assertEqual((value['effort_type'],value['effort_min_length']),('string',1))
+        self.assertIsNone(value['effort_enum'])
+        self.assertEqual(set(value['option_required']),{'description','reasoningEffort'})
+        self.assertEqual(value['thread_config_key'],'model_reasoning_effort')
+        self.assertTrue(value['thread_echo_optional'])
+        self.assertTrue(value['thread_echo_nullable'])
+        self.assertFalse(value['turn_has_effort_receipt'])
+        for schema in value['schemas'].values():
+            self.assertRegex(schema['sha256'],r'^[0-9a-f]{64}$')
+
     def test_evidence_is_versioned_bounded_and_stable_only(self):
         self.assertEqual(CONTRACT['version'], '0.167.0')
         self.assertFalse(CONTRACT['experimental_api'])

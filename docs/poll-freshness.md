@@ -1,50 +1,44 @@
-# Tunnel poll時刻の鮮度を含むreadiness
+# Readiness Requires a Fresh Tunnel Poll
 
-検証範囲：コードとオフラインfixture。コード配置、Git保存、実サービス検証は別に記録する。この修正のためのサービス操作は行わない。
+This reference records the 2026-10-30 readiness fix and offline evidence. Code placement, Git integration, and real-service verification are separate. Editing this guide does not operate a service. The [Japanese historical source](poll-freshness_jp.md) is unchanged.
 
-## 修正する問題
+## Problem
 
-2026-10-30の切断では、外部MCPが`tunnel_client_not_seen`を返す一方、ローカルhealthは`result=ok`、各okフラグもtrueを返した。`control_plane_poll.value`は13:29:02 UTCの成功時刻のままで、後続ログはtransport timeoutだった。
+During the incident, external MCP returned `tunnel_client_not_seen` while local health reported `result=ok` and true flags. `control_plane_poll.value` retained a successful 13:29:02 UTC timestamp despite later transport timeouts.
 
-`tunnel-client v0.0.18`のこのhealth返却で観測したvalueはUnix秒。従来helperはokフラグだけを確認していたため、古い成功値が残っている間もREADYになった。これはreadiness判定の問題で、transport timeoutの根本原因を特定したものではない。
+The observed value in tunnel-client v0.0.18 was Unix seconds. Checking flags alone accepted stale success as READY. The change fixes readiness interpretation; it does not establish the root cause of transport timeout.
 
-## 変更後の条件
+## Conditions
 
-既存のprivate URL file・loopback・キーを渡さない固定healthコマンド・timeoutと、すべてのokフラグ検査を維持する。その上で、次の条件を追加する。
+Retain the private URL file, loopback restriction, fixed key-free health command, deadlines, and all existing ok-flag checks. Additionally:
 
-- `control_plane_poll.value`と確認時のローカルwall clockが、正の有限な数値であること。bool・文字列・欠落値・非有限値・overflowは拒否する。
-- 最終成功時刻が未来でなく、確認時点から**90秒以内（境界を含む）**であること。
-- malformedなJSON object構造は正常と推測しない。解釈不能なJSON/health timeoutは既存呼出し側でNOT_READYとして扱う。
+- Poll value and local wall clock must be positive finite numbers. Reject bool, string, missing/nonfinite values, and overflow.
+- The last success must not be in the future and must be **at most 90 seconds old, inclusive**.
+- Malformed JSON/object structure is not presumed healthy. Callers treat uninterpretable health or timeout as NOT_READY.
 
-90秒は今回観測したpoll deadline 35秒＋最大backoff 10秒の約2周期分。外部側の300秒失踪エラーより早く劣化を示す初期値であり、SLAやtransport正常性の保証ではない。時刻同期の逆行時も保守的にNOT_READYになる。client更新でmetricの型・単位が変わる場合はschemaを再検証する。値なしをokフラグへfallbackしない。
+Ninety seconds is roughly two cycles of the observed 35-second poll deadline plus ten-second maximum backoff, earlier than the external 300-second disappearance error. It is an initial threshold, not an SLA or transport guarantee. Backward wall-clock movement conservatively fails readiness. Revalidate units/types after a client update; missing values never fall back to flags alone.
 
-## 影響と非影響
+## Effects and non-effects
 
-- `poc_services status`は古いpollをNOT_READYにする。保存済み所有世代やphaseは書き換えない。
-- login復帰処理は、稼働済みだが不健全なunitをALREADY_READYとは扱わなくなる。既存unitの再起動はせず照合待ちにする。
-- 将来のstart/ExecStartPost待機は鮮度を要求する。既存の起動deadline・失敗回収の規則はそのまま。
-- この変更自体は自動再起動、常駐監視、新MCP操作、再認証、権限拡大を追加しない。scheduler metadataの`orchestrator_status`はこのhelperを呼ばないため、その応答schemaは変わらない。
-- helperは新しいCLI/ログイン処理でimportされる。適用のためだけに稼働中daemon/tunnelを再起動する必要はない。native tunnel-client自身のhealth返却は変更しない。
+`poc_services status` reports stale polls as NOT_READY without changing saved owner/phase. Login restoration no longer treats unhealthy existing units as `ALREADY_READY`; it waits for reconciliation rather than restarting them. Future start/ExecStartPost waits require freshness while retaining existing startup deadlines and cleanup rules.
 
-## 試験
+The fix adds no restart/watch loop, MCP tool, reauthentication, or permissions. `orchestrator_status` scheduler metadata does not call this helper and keeps its schema. New CLI/login processes import it; applying the source does not require restarting a live daemon/Tunnel just to load it. Native tunnel-client health output is not changed.
 
-追加`tests/test_poll_freshness.py`の16件で、今回のstale値、90秒境界、未来/不正/欠落値、既存status/login経路、CLIのbounded failure、キーを渡さない固定呼出しを確認する。変更前helperで今回のincident assertionが1件失敗することも対照確認した。
+## Historical verification
 
-関連のlogin20件・grant14件・Readiness4件を含め、**54検査PASS**。全てオフラインfixtureで、現用service、実モデル、GPU/NPU、namespace操作は行っていない。systemdを実際に操作するfixture classは対象外であり、実service統合成功とは主張しない。
+Sixteen new freshness tests covered the incident, inclusive 90-second boundary, future/invalid/missing values, status/login paths, bounded CLI failure, and the fixed key-free command. The old helper failed the incident assertion as a control. With related login/grant/readiness fixtures, the recorded total was **54 passing offline checks**. No live service/model/GPU/NPU/namespace operation or real-systemd integration success was claimed.
 
-Gitからの新規checkoutではignoredのローカルTunnel設定がないため、既存preflight検査にfixture準備が必要だった。テスト用worktreeだけで公開exampleをコピーし、値を有効な実環境設定へ置換せず使用した。検査をskip・弱化せず、次の2件はGit除外のままとする。
+Fresh checkouts lacked ignored Tunnel configuration required by existing mock preflight. Only the test worktree copied public synthetic examples, without substituting real deployment values:
 
 ```bash
 cp systemd/aceis-mcp-tunnel.example.yaml systemd/aceis-mcp-tunnel.yaml
 cp systemd/aceis-mcp-tunnel.example.service systemd/aceis-mcp-tunnel.service
 ```
 
-このコピーはmock検査用で、実tunnel-clientへ渡さない。現用設定をコピーしたり上書きしたりしない。
+These ignored copies are for mocks, not real tunnel-client use. Do not copy or overwrite live configuration. No checks were skipped or weakened to make that evidence pass.
 
-## 適用・戻し方
+## Application and rollback
 
-候補は`service_wait.py`・既存readinessテスト1箇所・新規テスト・本書の4ファイル。現用へ適用する前に最新hashと差分を再確認する。サービス/unit/key/runtime設定/DBは変更しない。適用後は新しいCLIで鮮度を含むreadinessを確認し、再起動はしない。外部MCP疎通の成否も別に確認する。
+The original candidate comprised `service_wait.py`, one existing readiness assertion, new tests, and this guide. Recheck current hashes/diffs before authorized integration. Do not change services, units, keys, runtime configuration, or DB. Inspect readiness through a new CLI without restarting, and check external MCP reachability separately.
 
-rollbackは今回4ファイルの差分だけを戻す。対象に後続変更があれば機械的に上書きせず再統合する。戻すと古いpoll成功をREADYとする従来の制限も戻る。
-
-transport障害の再発原因調査、外部疎通監視、dispatcher/adapterの実ツールsmokeは独立の残件。今回のreadiness修正で解消済みとは扱わない。
+Rollback only the candidate's changes, integrating any later edits rather than overwriting them. Reverting also restores the stale-success limitation. Recurring transport diagnosis, external reachability monitoring, and actual dispatcher/adapter tool smoke tests remain independent follow-ups.

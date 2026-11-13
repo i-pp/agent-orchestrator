@@ -1,0 +1,40 @@
+name: Reconciled pipeline regressions
+
+on:
+  pull_request:
+    paths:
+      - 'src/codex_*.py'
+      - 'src/pipeline_*.py'
+      - 'src/scheduler.py'
+      - 'src/resources.py'
+      - 'src/daemon.py'
+      - 'src/mcp_adapter.py'
+      - 'src/notification_outbox.py'
+      - 'scripts/pipeline_policy_migration.py'
+      - 'tests/test_codex_*.py'
+      - 'tests/test_pipeline_*.py'
+      - 'scheduler-config.json'
+      - '.github/workflows/pipeline-regression-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    name: Recovered protocol and pipeline tests (offline)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify current source with fake peers and private temporary ledgers
+        env:
+          PYTHONPATH: tests
+        run: >-
+          python3 -B -m unittest
+          test_codex_app_protocol test_codex_pipeline test_codex_pipeline_gateway
+          test_codex_blocked_ownership
+          test_codex_lifecycle test_pipeline_capacity test_pipeline_memory_budget
+          test_pipeline_policy_migration -v
