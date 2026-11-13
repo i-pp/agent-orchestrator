@@ -151,3 +151,33 @@ test('parent standard return ingress preserves the supplied value without claimi
   assert.equal(received[0].body.request_ref,ref);
   assert.equal(receipt.automatic_tool_execution,false);
 });
+
+// Every supported pair must survive the post-admission transport unchanged.
+test('read-only preparation preserves all supported model-effort pairs',async()=>{
+  const pairs={
+    'gpt-6.1-sol':['low','medium','high','xhigh','max','ultra'],
+    'gpt-6-luna':['low','medium','high','xhigh','max'],
+  };
+  for(const [model,efforts] of Object.entries(pairs)) for(const reasoning_effort of efforts){
+    const args={fork_turns:'none',model,reasoning_effort,task_name:'research',message:'fixed'};
+    let calls=0;
+    const result=await prepareReadonly({runLocalAdapter:async op=>{
+      calls++;return {status:'OK',operation:op,result:{profile:'collaboration-parent-v4',
+        tool_calls:[{tool:'collaboration.spawn_agent',arguments:args}],parent_jobs:[],pending_reconciliation:[]}};
+    }});
+    assert.equal(result.arguments,args);
+    assert.equal(calls,1);
+  }
+});
+test('read-only preparation rejects invalid pairs without replay',async()=>{
+  for(const [model,reasoning_effort] of [['gpt-6-luna','ultra'],['gpt-6.1-sol','unknown'],
+    ['unknown','max'],['gpt-6.1-sol',null],['gpt-6-luna',undefined]]){
+    let calls=0;
+    await assert.rejects(()=>prepareReadonly({runLocalAdapter:async op=>{
+      calls++;return {status:'OK',operation:op,result:{profile:'collaboration-parent-v4',
+        tool_calls:[{tool:'collaboration.spawn_agent',arguments:{fork_turns:'none',model,reasoning_effort}}],
+        parent_jobs:[],pending_reconciliation:[]}};
+    }}),/NO_REPLAY/);
+    assert.equal(calls,1);
+  }
+});

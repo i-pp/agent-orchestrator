@@ -116,6 +116,14 @@ async function local(api, op, body) {
   return reply.result;
 }
 
+// Mirror the native profile contract at this transport-only boundary.
+// Python validates the pair before admission; never narrow valid issued work.
+function supportedSelection(model, effort) {
+  const common = ['low', 'medium', 'high', 'xhigh', 'max'];
+  return (model === 'gpt-6.1-sol' && [...common, 'ultra'].includes(effort))
+    || (model === 'gpt-6-luna' && common.includes(effort));
+}
+
 async function prepareReadonly(api) {
   const step = await local(api, 'readonly_prepare', {});
   if (step.profile !== 'collaboration-parent-v4' || step.tool_calls?.length !== 1
@@ -123,8 +131,7 @@ async function prepareReadonly(api) {
     throw Error('SINGLE_FRESH_SPAWN_REQUIRED_NO_REPLAY');
   const call = step.tool_calls[0];
   if (call.tool !== 'collaboration.spawn_agent' || call.arguments?.fork_turns !== 'none'
-      || !['gpt-6.1-sol', 'gpt-6-luna'].includes(call.arguments?.model)
-      || call.arguments?.reasoning_effort !== 'max')
+      || !supportedSelection(call.arguments?.model, call.arguments?.reasoning_effort))
     throw Error('SINGLE_FRESH_SPAWN_REQUIRED_NO_REPLAY');
   // Returned arguments are exactly the fixed short bootstrap. The parent must
   // use its standard tool once; collaboration is unavailable inside Code Mode.
