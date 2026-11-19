@@ -38,13 +38,13 @@ Multiple workers can share an implementation level, but never a writable checkou
 
 ## Explicit models and bounded parallelism
 
-`.codex/config.toml` sets the standard `gpt-6.1-sol` / `high` default for new trusted sessions. Each `.codex/agents/*.toml` explicitly selects both settings by responsibility; lightweight work is not forced onto the strongest model.
+`.codex/config.toml` sets the standard `gpt-6.2-sol` / `high` subagent default for new trusted sessions. Each `.codex/agents/*.toml` explicitly selects both settings by responsibility; lightweight work is not forced onto the strongest model.
 
 | Assignment | Model | Reasoning effort | Rationale |
 | --- | --- | --- | --- |
 | Quick Implementer, Researcher, Documentation Reviewer, Verifier | `gpt-6-luna` | `max` | Narrow edits, bounded evidence gathering, documentation checks, and specified acceptance checks. |
-| Implementer, Independent Reviewer, Test Reviewer, Performance Reviewer, Orchestrator | `gpt-6.1-sol` | `high` | Design-aware implementation, judgment across behavior and tests, and bounded dependency planning. |
-| Advanced Implementer, Security Reviewer | `gpt-6.1-sol` | `max` | Ambiguous cross-module contracts, concurrency/recovery, and security-sensitive boundaries. |
+| Implementer, Independent Reviewer, Test Reviewer, Performance Reviewer, Orchestrator | `gpt-6.2-sol` | `high` | Design-aware implementation, judgment across behavior and tests, and bounded dependency planning. |
+| Advanced Implementer, Security Reviewer | `gpt-6.2-sol` | `max` | Ambiguous cross-module contracts, concurrency/recovery, and security-sensitive boundaries. |
 
 These are starting profiles, not measured quality or cost guarantees. The parent must raise the model or effort before dispatch when a nominally simple assignment contains ambiguous evidence, consequential risk, or substantial rework potential. Conversely, bounded work may use a lower supported effort when its acceptance criteria are clear. Never change an in-flight run's pinned profile. A known failed attempt can inform a new scoped assignment; an uncertain attempt must first be reconciled, not retried on another model.
 

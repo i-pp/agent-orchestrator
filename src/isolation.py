@@ -9,7 +9,7 @@ import sys
 from isolation_guard import require_isolation_creation
 
 
-CONFIG = '''model = "gpt-6.1-sol"
+CONFIG = '''model = "gpt-6.2-sol"
 model_provider = "openai"
 forced_login_method = "chatgpt"
 cli_auth_credentials_store = "file"
@@ -33,6 +33,10 @@ persistence = "none"
 '''
 
 
+# Existing homes retain their original model and every other policy field.
+PERSISTED_CONFIGS = (CONFIG, CONFIG.replace('model = "gpt-6.2-sol"', 'model = "gpt-6.1-sol"', 1))
+
+
 def prepare(root, binary=None):
     root = Path(root).expanduser().resolve()
     binary = str(Path(binary or shutil.which("codex") or "/missing-codex").resolve())
@@ -44,7 +48,7 @@ def prepare(root, binary=None):
     for name in ["codex-home", "workspace", "tmp", "logs"]:
         (root / name).mkdir(exist_ok=True, mode=0o700)
     config = root / "codex-home/config.toml"
-    if config.exists() and config.read_text() != CONFIG:
+    if config.exists() and config.read_text() not in PERSISTED_CONFIGS:
         raise ValueError("Isolated config differs from the fixed read-only policy")
     if not config.exists():
         config.write_text(CONFIG)

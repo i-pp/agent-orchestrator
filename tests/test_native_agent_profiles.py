@@ -33,13 +33,13 @@ EXPECTED_SELECTIONS = {
     'Researcher': ('gpt-6-luna', 'max'),
     'DocumentationReviewer': ('gpt-6-luna', 'max'),
     'Verifier': ('gpt-6-luna', 'max'),
-    'Implementer': ('gpt-6.1-sol', 'high'),
-    'IndependentReviewer': ('gpt-6.1-sol', 'high'),
-    'TestReviewer': ('gpt-6.1-sol', 'high'),
-    'PerformanceReviewer': ('gpt-6.1-sol', 'high'),
-    'Orchestrator': ('gpt-6.1-sol', 'high'),
-    'ImplementerAdvanced': ('gpt-6.1-sol', 'max'),
-    'SecurityReviewer': ('gpt-6.1-sol', 'max'),
+    'Implementer': ('gpt-6.2-sol', 'high'),
+    'IndependentReviewer': ('gpt-6.2-sol', 'high'),
+    'TestReviewer': ('gpt-6.2-sol', 'high'),
+    'PerformanceReviewer': ('gpt-6.2-sol', 'high'),
+    'Orchestrator': ('gpt-6.2-sol', 'high'),
+    'ImplementerAdvanced': ('gpt-6.2-sol', 'max'),
+    'SecurityReviewer': ('gpt-6.2-sol', 'max'),
 }
 
 
@@ -112,7 +112,7 @@ class RecommendationTests(unittest.TestCase):
                              EXPECTED_SELECTIONS[role])
         project = tomllib.loads((PROJECT / '.codex/config.toml').read_text())['agents']
         self.assertEqual(project['max_concurrent_threads_per_session'], 6)
-        self.assertEqual(project['default_subagent_model'], 'gpt-6.1-sol')
+        self.assertEqual(project['default_subagent_model'], 'gpt-6.2-sol')
         self.assertEqual(project['default_subagent_reasoning_effort'], 'high')
 
     def test_cli_reads_actual_profile_settings_without_starting_a_run(self):
@@ -271,14 +271,14 @@ class ModelHandoffTests(unittest.TestCase):
             with self.subTest(role=role):
                 adapter = self.new_adapter(role, role)
                 call = adapter.step()['tool_calls'][0]
-                self.assertEqual(call['arguments']['model'], 'gpt-6.1-sol')
+                self.assertEqual(call['arguments']['model'], 'gpt-6.2-sol')
                 self.assertEqual(call['arguments']['reasoning_effort'], 'max')
                 self.assertEqual(call['arguments']['fork_turns'], 'none')
                 ref = call['context_ref']
                 message = adapter.context(ref['key'], ref['sha256'])['message']
                 prompt = json.loads(message.split('\nTASK\n')[1])
                 self.assertEqual(prompt['role'], role)
-                self.assertEqual(prompt['model'], 'gpt-6.1-sol')
+                self.assertEqual(prompt['model'], 'gpt-6.2-sol')
                 self.assertEqual(prompt['reasoning_effort'], 'max')
 
     def test_checked_in_role_settings_reach_spawn_and_immutable_context(self):
@@ -300,7 +300,7 @@ class ModelHandoffTests(unittest.TestCase):
         source = path.read_text()
         for model, efforts in MODEL_EFFORTS.items():
             for effort in efforts:
-                path.write_text(source.replace('gpt-6.1-sol', model).replace(
+                path.write_text(source.replace('gpt-6.2-sol', model).replace(
                     'model_reasoning_effort = "max"', 'model_reasoning_effort = "' + effort + '"'))
                 call = self.new_adapter('Researcher', model + '-' + effort).step()['tool_calls'][0]
                 self.assertEqual((call['arguments']['model'], call['arguments']['reasoning_effort']),
@@ -309,7 +309,7 @@ class ModelHandoffTests(unittest.TestCase):
 
     def test_model_specific_unsupported_pair_is_rejected(self):
         path = self.f.f.project / '.codex/agents/researcher.toml'
-        path.write_text(path.read_text().replace('gpt-6.1-sol', 'gpt-6-luna').replace(
+        path.write_text(path.read_text().replace('gpt-6.2-sol', 'gpt-6-luna').replace(
             'model_reasoning_effort = "max"', 'model_reasoning_effort = "ultra"'))
         with self.assertRaisesRegex(AdapterError, 'UNSUPPORTED_ROLE_SETTINGS'):
             self.new_adapter('Researcher', 'luna-ultra')
@@ -317,7 +317,7 @@ class ModelHandoffTests(unittest.TestCase):
     def test_fallback_is_an_explicit_new_profile_choice_never_a_failed_spawn_retry(self):
         # Availability/permission is the parent's pre-dispatch responsibility.
         path = self.f.f.project / '.codex/agents/researcher.toml'
-        path.write_text(path.read_text().replace('gpt-6.1-sol', 'gpt-6-luna'))
+        path.write_text(path.read_text().replace('gpt-6.2-sol', 'gpt-6-luna'))
         adapter = self.new_adapter('Researcher', 'fallback')
         first = adapter.step()['tool_calls'][0]
         self.assertEqual(first['arguments']['model'], 'gpt-6-luna')
@@ -331,7 +331,7 @@ class ModelHandoffTests(unittest.TestCase):
         adapter = self.new_adapter('Researcher', 'pinned')
         path = self.f.f.project / '.codex/agents/researcher.toml'
         before = adapter.team.snapshot()
-        path.write_text(path.read_text().replace('gpt-6.1-sol', 'gpt-6-luna'))
+        path.write_text(path.read_text().replace('gpt-6.2-sol', 'gpt-6-luna'))
         with self.assertRaisesRegex(AdapterError, 'ROLE_PIN'):
             adapter.step()
         self.assertEqual(adapter.team.snapshot(), before)
@@ -340,10 +340,11 @@ class ModelHandoffTests(unittest.TestCase):
         path = self.f.f.project / '.codex/agents/researcher.toml'
         source = path.read_text()
         for i, replacement in enumerate([
-                source.replace('gpt-6.1-sol', 'gpt-6-astra'),
-                source.replace('gpt-6.1-sol', 'gpt-6-sol'),
+                source.replace('gpt-6.2-sol', 'gpt-6-astra'),
+                source.replace('gpt-6.2-sol', 'gpt-6.2-astra'),
+                source.replace('gpt-6.2-sol', 'gpt-6-sol'),
                 source.replace('model_reasoning_effort = "max"', 'model_reasoning_effort = "unadvertised"'),
-                source.replace('model = "gpt-6.1-sol"\n', ''),
+                source.replace('model = "gpt-6.2-sol"\n', ''),
                 source + '\nsandbox_mode = "danger-full-access"\n']):
             path.write_text(replacement)
             with self.assertRaisesRegex(AdapterError, 'UNSUPPORTED_ROLE_SETTINGS'):

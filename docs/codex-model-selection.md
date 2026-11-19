@@ -49,3 +49,13 @@ If that bounded read-only proof is temporarily unavailable, an exact-key retry c
 - A timeout or unknown prior effect is not a rejected generation. Preserve the existing reconciliation and held-slot rules rather than submitting another turn.
 
 The native team's configurable child-worker limit, ordinary daemon sessions and Codex pipeline capacity are separate limits. Use each path's actual configuration and resource checks instead of copying another pool's number.
+
+## Use a dedicated Codex CLI profile
+
+For an interactive Astra assignment covered by the [canonical model-selection policy](https://github.com/i-pp/ai-orchestration/blob/main/docs/ai/orchestration.md#explicit-model-selection), verify that the installed CLI supports the named profile and that its configured model and effort match the recorded assignment. On a workstation with `astra-review.config.toml` installed in the active Codex home, start a fresh session with this command.
+
+```sh
+codex --profile astra-review
+```
+
+End that session when the assignment reaches its stopping condition. Start follow-on work in a fresh session with its usual model selection. The CLI profile applies to the interactive session. The project's native v4 adapter uses its [validated role profiles](native-agent-team.md#explicit-models-and-bounded-parallelism).

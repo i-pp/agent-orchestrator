@@ -120,7 +120,7 @@ async function local(api, op, body) {
 // Python validates the pair before admission; never narrow valid issued work.
 function supportedSelection(model, effort) {
   const common = ['low', 'medium', 'high', 'xhigh', 'max'];
-  return (model === 'gpt-6.1-sol' && [...common, 'ultra'].includes(effort))
+  return (model === 'gpt-6.2-sol' && [...common, 'ultra'].includes(effort))
     || (model === 'gpt-6-luna' && common.includes(effort));
 }
 
