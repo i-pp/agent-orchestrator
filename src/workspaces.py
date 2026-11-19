@@ -9,7 +9,7 @@ import time
 import uuid
 
 from concurrency import identifier
-from isolation import prepare, CONFIG
+from isolation import prepare, PERSISTED_CONFIGS
 from verification import read_artifact, workspace_snapshot
 
 
@@ -141,7 +141,7 @@ def layout(root, store, task):
             raise ValueError("Workspace layout is unsafe")
     safe_tree(directory / "workspace")
     config = directory / "codex-home/config.toml"
-    if config.is_symlink() or config.read_text() != CONFIG or (directory / "codex-home/auth.json").is_symlink():
+    if config.is_symlink() or config.read_text() not in PERSISTED_CONFIGS or (directory / "codex-home/auth.json").is_symlink():
         raise ValueError("Private Codex policy or authentication mountpoint changed")
     if task["role"] == "reviewer":
         snapshot = store.db.execute("SELECT * FROM snapshots WHERE id=?", (task["snapshot_id"],)).fetchone()

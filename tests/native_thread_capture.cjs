@@ -155,7 +155,7 @@ test('parent standard return ingress preserves the supplied value without claimi
 // Every supported pair must survive the post-admission transport unchanged.
 test('read-only preparation preserves all supported model-effort pairs',async()=>{
   const pairs={
-    'gpt-6.1-sol':['low','medium','high','xhigh','max','ultra'],
+    'gpt-6.2-sol':['low','medium','high','xhigh','max','ultra'],
     'gpt-6-luna':['low','medium','high','xhigh','max'],
   };
   for(const [model,efforts] of Object.entries(pairs)) for(const reasoning_effort of efforts){
@@ -170,8 +170,8 @@ test('read-only preparation preserves all supported model-effort pairs',async()=
   }
 });
 test('read-only preparation rejects invalid pairs without replay',async()=>{
-  for(const [model,reasoning_effort] of [['gpt-6-luna','ultra'],['gpt-6.1-sol','unknown'],
-    ['unknown','max'],['gpt-6.1-sol',null],['gpt-6-luna',undefined]]){
+  for(const [model,reasoning_effort] of [['gpt-6-luna','ultra'],['gpt-6.2-sol','unknown'],
+    ['gpt-6.2-astra','high'],['unknown','max'],['gpt-6.2-sol',null],['gpt-6-luna',undefined]]){
     let calls=0;
     await assert.rejects(()=>prepareReadonly({runLocalAdapter:async op=>{
       calls++;return {status:'OK',operation:op,result:{profile:'collaboration-parent-v4',

@@ -18,11 +18,11 @@ ROLES = {
     'Researcher': ('researcher', 'none'),
     'Coordinator': ('parent', 'integration only'),
 }
-MODELS = {'gpt-6.1-sol', 'gpt-6-luna'}
-PRIMARY_MODEL = 'gpt-6.1-sol'
+MODELS = {'gpt-6.2-sol', 'gpt-6-luna'}
+PRIMARY_MODEL = 'gpt-6.2-sol'
 # Native collaboration compatibility, not provider/account availability.
 MODEL_EFFORTS = {
-    'gpt-6.1-sol': frozenset({'low', 'medium', 'high', 'xhigh', 'max', 'ultra'}),
+    'gpt-6.2-sol': frozenset({'low', 'medium', 'high', 'xhigh', 'max', 'ultra'}),
     'gpt-6-luna': frozenset({'low', 'medium', 'high', 'xhigh', 'max'}),
 }
 
